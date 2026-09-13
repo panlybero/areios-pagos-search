@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Άρειος Πάγος — Αναζήτηση Νομολογίας</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f8fafc',
+              100: '#f1f5f9',
+              800: '#1e293b',
+              900: '#0f172a',
+            },
+            accent: {
+              500: '#d97706',
+              600: '#b45309',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap');
+    .legal-header { font-family: 'Cinzel', serif; }
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    mark { background-color: #fef08a; padding: 0 2px; border-radius: 2px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
+
+  <!-- TOP NAV -->
+  <header class="bg-brand-900 text-white shadow-md border-b border-slate-700 sticky top-0 z-30">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-9 h-9 rounded bg-accent-500 flex items-center justify-center font-bold text-white shadow">
+          ⚖️
+        </div>
+        <div>
+          <h1 class="font-bold text-lg leading-tight tracking-wide">ΑΡΕΙΟΣ ΠΑΓΟΣ</h1>
+          <p class="text-xs text-slate-400">Αναζήτηση Νομολογίας &amp; MCP Server</p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-2 text-sm">
+        <button id="btnSyncPoll" onclick="triggerSync()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-xs text-slate-200 flex items-center gap-1.5 transition">
+          <span id="syncIcon">🔄</span>
+          <span>Έλεγχος Νέων</span>
+        </button>
+        <button onclick="openBackfillModal()" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded text-xs text-slate-200 flex items-center gap-1.5 transition">
+          <span>⏳</span>
+          <span>Ανάκτηση Ετών</span>
+        </button>
+        <button onclick="openMcpModal()" class="px-3 py-1.5 bg-accent-600 hover:bg-accent-500 rounded text-xs text-white font-medium flex items-center gap-1.5 shadow transition">
+          <span>🤖</span>
+          <span>Σύνδεση Agent (MCP)</span>
+        </button>
+        <button onclick="openConfigModal()" title="Ρυθμίσεις API Key" class="p-1.5 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition">
+          ⚙️
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- API KEY BANNER (Shown if API key is missing) -->
+  <div id="apiKeyBanner" class="hidden bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-3">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3 text-sm">
+      <div class="flex items-center gap-2">
+        <span class="text-xl">⚠️</span>
+        <div>
+          <span class="font-semibold">Απαιτείται κλειδί Gemini API:</span>
+          <span>Για τη σημασιολογική αναζήτηση εισάγετε το δωρεάν κλειδί σας από το Google AI Studio.</span>
+        </div>
+      </div>
+      <button onclick="openConfigModal()" class="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded font-medium text-xs whitespace-nowrap shadow transition">
+        Ρύθμιση Κλειδιού
+      </button>
+    </div>
+  </div>
+
+  <!-- MAIN CONTENT -->
+  <main class="flex-1 max-w-6xl w-full mx-auto px-4 py-6">
+
+    <!-- SEARCH PANEL -->
+    <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 mb-6">
+      
+      <!-- Search Mode Tabs -->
+      <div class="flex space-x-2 mb-4 border-b border-slate-100 pb-3">
+        <button onclick="setMode('hybrid')" id="tabHybrid" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-brand-900 text-white transition">
+          ⚡ Υβριδική (Hybrid)
+        </button>
+        <button onclick="setMode('semantic')" id="tabSemantic" class="px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition">
+          🧠 Σημασιολογική (Semantic)
+        </button>
+        <button onclick="setMode('keyword')" id="tabKeyword" class="px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition">
+          🔍 Λέξεις-Κλειδιά (Keyword)
+        </button>
+      </div>
+
+      <!-- Search Input -->
+      <div class="relative flex items-center mb-4">
+        <input 
+          type="text" 
+          id="queryInput" 
+          placeholder="π.χ. παραγραφή αξιώσεων αποζημίωσης κατά του Δημοσίου, άρθρο 559 ΚΠολΔ, 144/2015..." 
+          class="w-full px-4 py-3.5 pl-11 pr-28 text-base bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-accent-500 focus:bg-white transition"
+          onkeydown="if(event.key === 'Enter') executeSearch()"
+        />
+        <span class="absolute left-3.5 text-slate-400 text-lg">🔍</span>
+        <button 
+          onclick="executeSearch()" 
+          id="btnSearch"
+          class="absolute right-2 px-5 py-2 bg-brand-900 hover:bg-brand-800 text-white rounded-lg font-medium text-sm transition shadow-sm"
+        >
+          Αναζήτηση
+        </button>
+      </div>
+
+      <!-- Filters Row -->
+      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs text-slate-600 pt-2 border-t border-slate-100">
+        <div>
+          <label class="block font-medium mb-1 text-slate-700">Κατηγορία</label>
+          <select id="filterCategory" class="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-accent-500">
+            <option value="">Όλες οι Κατηγορίες</option>
+            <option value="ΠΟΛΙΤΙΚΕΣ">Πολιτικές</option>
+            <option value="ΠΟΙΝΙΚΕΣ">Ποινικές</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block font-medium mb-1 text-slate-700">Τμήμα</label>
+          <select id="filterChamber" class="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-accent-500">
+            <option value="">Όλα τα Τμήματα</option>
+            <option value="Α1">Α1</option>
+            <option value="Α2">Α2</option>
+            <option value="Β1">Β1</option>
+            <option value="Β2">Β2</option>
+            <option value="Γ">Γ</option>
+            <option value="Δ">Δ</option>
+            <option value="Ε">Ε</option>
+            <option value="ΣΤ">ΣΤ</option>
+            <option value="Ζ">Ζ</option>
+            <option value="ΟΛΟΜΕΛΕΙΑ">Ολομέλεια</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block font-medium mb-1 text-slate-700">Έτη (Από - Έως)</label>
+          <div class="flex items-center space-x-1.5">
+            <input type="number" id="filterYearFrom" placeholder="1994" class="w-1/2 p-2 bg-slate-50 border border-slate-200 rounded-lg text-center" />
+            <span>-</span>
+            <input type="number" id="filterYearTo" placeholder="2026" class="w-1/2 p-2 bg-slate-50 border border-slate-200 rounded-lg text-center" />
+          </div>
+        </div>
+
+        <div>
+          <label class="block font-medium mb-1 text-slate-700">Θεματικό Λήμμα</label>
+          <select id="filterTheme" class="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-accent-500">
+            <option value="">Όλα τα Λήμματα</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- STATUS & STATS BAR -->
+    <div class="flex items-center justify-between text-xs text-slate-500 px-1 mb-4">
+      <div id="corpusStats">Φόρτωση κατάστασης βάσης...</div>
+      <div id="searchMeta" class="font-medium text-slate-700"></div>
+    </div>
+
+    <!-- SEARCH RESULTS CONTAINER -->
+    <div id="resultsContainer" class="space-y-4">
+      <div id="initialState" class="text-center py-16 text-slate-400">
+        <div class="text-4xl mb-3">⚖️</div>
+        <p class="text-sm font-medium">Εισάγετε αναζήτηση για να δείτε σχετικές αποφάσεις</p>
+        <p class="text-xs mt-1">Η σημασιολογική αναζήτηση λειτουργεί με βάση το νόημα, ακόμη και με περιγραφή της υπόθεσης.</p>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- MODAL: DECISION VIEWER -->
+  <div id="decisionModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <div class="px-6 py-4 bg-slate-900 text-white flex items-center justify-between border-b border-slate-700">
+        <div>
+          <span id="modalCitation" class="text-lg font-bold text-accent-500">Απόφαση</span>
+          <span id="modalMeta" class="text-xs text-slate-300 ml-2"></span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <button onclick="copyDecisionText()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs transition">
+            📋 Αντιγραφή
+          </button>
+          <button onclick="closeDecisionModal()" class="text-slate-400 hover:text-white text-xl leading-none px-2">
+            &times;
+          </button>
+        </div>
+      </div>
+      <div class="p-6 overflow-y-auto flex-1 text-slate-800 space-y-4 leading-relaxed text-sm">
+        <div id="modalSubjectBox" class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-xs hidden">
+          <span class="font-semibold">Θέμα: </span><span id="modalSubject"></span>
+        </div>
+        <div id="modalSummaryBox" class="p-3.5 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-xs hidden">
+          <span class="font-semibold block mb-1">Περίληψη:</span>
+          <span id="modalSummary"></span>
+        </div>
+        <div id="modalBody" class="whitespace-pre-line font-serif text-[15px] leading-relaxed pt-2"></div>
+      </div>
+      <div class="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-between items-center text-xs text-slate-500">
+        <a id="modalExternalLink" href="#" target="_blank" class="text-accent-600 hover:underline flex items-center gap-1 font-medium">
+          Προβολή στον επίσημο ιστότοπο (areiospagos.gr) ↗
+        </a>
+        <button onclick="closeDecisionModal()" class="px-4 py-1.5 bg-slate-200 hover:bg-slate-300 rounded text-slate-700 font-medium">
+          Κλείσιμο
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: API KEY CONFIG -->
+  <div id="configModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-bold text-base text-slate-900 flex items-center gap-2">
+          <span>🔑</span> Ρύθμιση Gemini API Key
+        </h3>
+        <button onclick="closeConfigModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+
+      <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+        Για τη σημασιολογική αναζήτηση απαιτείται ένα κλειδί Google Gemini API. Το κλειδί παρέχεται <strong>εντελώς δωρεάν</strong> από το Google AI Studio.
+      </p>
+
+      <a href="https://aistudio.google.com/app/apikey" target="_blank" class="block w-full text-center py-2 px-3 mb-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-medium text-xs border border-slate-300 transition">
+        ↗ Λήψη Δωρεάν Κλειδιού από Google AI Studio
+      </a>
+
+      <div class="mb-4">
+        <label class="block text-xs font-semibold text-slate-700 mb-1">Το API Key σας:</label>
+        <input 
+          type="password" 
+          id="inputApiKey" 
+          placeholder="AIzaSy..." 
+          class="w-full p-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:ring-2 focus:ring-accent-500 focus:outline-none"
+        />
+      </div>
+
+      <div id="apiKeyMsg" class="text-xs mb-4 hidden"></div>
+
+      <div class="flex justify-end space-x-2">
+        <button onclick="closeConfigModal()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-medium text-slate-700">
+          Ακύρωση
+        </button>
+        <button onclick="saveApiKey()" id="btnSaveKey" class="px-4 py-2 bg-brand-900 hover:bg-brand-800 text-white rounded-lg text-xs font-medium shadow transition">
+          Δοκιμή &amp; Αποθήκευση
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: MCP HELPER -->
+  <div id="mcpModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-bold text-base text-slate-900 flex items-center gap-2">
+          <span>🤖</span> Σύνδεση με AI Agent (MCP)
+        </h3>
+        <button onclick="closeMcpModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+
+      <p class="text-xs text-slate-600 mb-3 leading-relaxed">
+        Ο ενσωματωμένος Model Context Protocol (MCP) server επιτρέπει σε εφαρμογές όπως το <strong>OpenWork</strong>, το <strong>Claude Desktop</strong> ή το <strong>Cursor</strong> να αναζητούν αποφάσεις απευθείας.
+      </p>
+
+      <div class="mb-3">
+        <div class="flex justify-between items-center mb-1">
+          <span class="text-xs font-semibold text-slate-700">Ρύθμιση για OpenWork / Claude (HTTP):</span>
+          <button onclick="copyMcpJson()" id="btnCopyMcp" class="text-xs text-accent-600 hover:underline font-medium">
+            📋 Αντιγραφή JSON
+          </button>
+        </div>
+        <pre id="mcpConfigText" class="p-3 bg-slate-900 text-emerald-400 text-xs rounded-lg overflow-x-auto font-mono leading-relaxed">{
+  "mcpServers": {
+    "areios-pagos": {
+      "httpUrl": "http://localhost:8766/mcp"
+    }
+  }
+}</pre>
+      </div>
+
+      <p class="text-[11px] text-slate-500 mb-4">
+        Επικολλήστε το παραπάνω τμήμα στο αρχείο ρυθμίσεων του agent σας (π.χ. στο OpenWork Settings &rarr; MCP Servers ή στο <code>claude_desktop_config.json</code>).
+      </p>
+
+      <div class="flex justify-end">
+        <button onclick="closeMcpModal()" class="px-4 py-2 bg-brand-900 hover:bg-brand-800 text-white rounded-lg text-xs font-medium">
+          Κλείσιμο
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: BACKFILL & COST CALCULATOR -->
+  <div id="backfillModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-bold text-base text-slate-900 flex items-center gap-2">
+          <span>⏳</span> Υπολογιστής Κόστους &amp; Ανάκτηση Ετών
+        </h3>
+        <button onclick="closeBackfillModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">&times;</button>
+      </div>
+
+      <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+        Μπορείτε να ανακτήσετε παλαιότερα έτη (1994–2017) απευθείας στη συσκευή σας. Η εφαρμογή υπολογίζει εκ των προτέρων το εκτιμώμενο κόστος του Gemini API:
+      </p>
+
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Από Έτος:</label>
+          <input type="number" id="bfYearFrom" value="2018" min="1994" max="2026" onchange="updateBackfillEstimate()" class="w-full p-2 text-sm bg-slate-50 border border-slate-300 rounded-lg text-center font-medium" />
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Έως Έτος:</label>
+          <input type="number" id="bfYearTo" value="2023" min="1994" max="2026" onchange="updateBackfillEstimate()" class="w-full p-2 text-sm bg-slate-50 border border-slate-300 rounded-lg text-center font-medium" />
+        </div>
+      </div>
+
+      <!-- Cost Calculation Card -->
+      <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4 text-xs space-y-2">
+        <div class="flex justify-between text-slate-600">
+          <span>Εκτιμώμενες Αποφάσεις:</span>
+          <span id="estDecisions" class="font-semibold text-slate-800">~16,000</span>
+        </div>
+        <div class="flex justify-between text-slate-600">
+          <span>Εκτιμώμενα Αποσπάσματα (Chunks):</span>
+          <span id="estChunks" class="font-semibold text-slate-800">~350,000</span>
+        </div>
+        <div class="flex justify-between text-slate-600">
+          <span>Εκτιμώμενος Χρόνος (0.5 req/s):</span>
+          <span id="estTime" class="font-semibold text-slate-800">~10 ώρες</span>
+        </div>
+        <div class="pt-2 border-t border-slate-200 flex justify-between text-sm font-bold text-accent-600">
+          <span>Εκτιμώμενο Κόστος API:</span>
+          <span id="estCost">~$22 - $26</span>
+        </div>
+      </div>
+
+      <div class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-900 leading-relaxed mb-4">
+        ⚠️ Η ανάκτηση γίνεται με σεβασμό στον διακομιστή του Αρείου Πάγου και μπορεί να διακοπεί και να συνεχιστεί οποιαδήποτε στιγμή. Το κόστος χρεώνεται απευθείας στον προσωπικό σας λογαριασμό Google AI Studio.
+      </div>
+
+      <div id="backfillProgress" class="hidden mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-900">
+        <div class="flex justify-between font-semibold mb-1">
+          <span>Κατάσταση Ανάκτησης:</span>
+          <span id="bfStatusText">Σε εξέλιξη...</span>
+        </div>
+        <div class="w-full bg-blue-200 rounded-full h-2 overflow-hidden">
+          <div id="bfProgressBar" class="bg-blue-600 h-2 rounded-full w-0 transition-all duration-300"></div>
+        </div>
+      </div>
+
+      <div class="flex justify-end space-x-2">
+        <button onclick="closeBackfillModal()" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-xs font-medium text-slate-700">
+          Ακύρωση
+        </button>
+        <button onclick="startBackfill()" id="btnStartBackfill" class="px-4 py-2 bg-accent-600 hover:bg-accent-500 text-white rounded-lg text-xs font-semibold shadow transition">
+          Έναρξη με Δική μου Χρέωση
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT APPLICATION LOGIC -->
+  <script>
+    let currentMode = 'hybrid';
+    let currentResults = [];
+    let currentDecisionText = '';
+
+    // Init on page load
+    document.addEventListener('DOMContentLoaded', () => {
+      loadThemes();
+      loadCorpusStats();
+      checkApiKey();
+      updateBackfillEstimate();
+    });
+
+    function setMode(mode) {
+      currentMode = mode;
+      ['hybrid', 'semantic', 'keyword'].forEach(m => {
+        const btn = document.getElementById('tab' + m.charAt(0).toUpperCase() + m.slice(1));
+        if (m === mode) {
+          btn.className = "px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-brand-900 text-white transition";
+        } else {
+          btn.className = "px-3.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition";
+        }
+      });
+    }
+
+    async function checkApiKey() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        if (!data.has_api_key) {
+          document.getElementById('apiKeyBanner').classList.remove('hidden');
+        } else {
+          document.getElementById('apiKeyBanner').classList.add('hidden');
+        }
+      } catch (err) {
+        console.warn("Could not check status:", err);
+      }
+    }
+
+    async function loadThemes() {
+      try {
+        const res = await fetch('/themes?limit=500');
+        const data = await res.json();
+        const sel = document.getElementById('filterTheme');
+        (data.themes || []).forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.label;
+          opt.textContent = `${t.label} (${t.n_decisions})`;
+          sel.appendChild(opt);
+        });
+      } catch (err) {
+        console.error("Failed to load themes:", err);
+      }
+    }
+
+    async function loadCorpusStats() {
+      try {
+        const res = await fetch('/stats');
+        const s = await res.json();
+        document.getElementById('corpusStats').textContent = 
+          `Βάση Δεδομένων: ${s.decisions || 0} αποφάσεις (${s.first_year || 1994} - ${s.last_year || 2026}) • ${s.chunks || 0} αποσπάσματα`;
+      } catch (err) {
+        document.getElementById('corpusStats').textContent = 'Βάση Δεδομένων συνδεδεμένη';
+      }
+    }
+
+    async function executeSearch() {
+      const q = document.getElementById('queryInput').value.trim();
+      if (!q) return;
+
+      const btn = document.getElementById('btnSearch');
+      btn.disabled = true;
+      btn.textContent = 'Αναζήτηση...';
+
+      const cat = document.getElementById('filterCategory').value;
+      const cham = document.getElementById('filterChamber').value;
+      const yFrom = document.getElementById('filterYearFrom').value;
+      const yTo = document.getElementById('filterYearTo').value;
+      const theme = document.getElementById('filterTheme').value;
+
+      const params = new URLSearchParams({
+        q: q,
+        mode: currentMode,
+        limit: 25
+      });
+      if (cat) params.set('category', cat);
+      if (cham) params.set('chamber', cham);
+      if (yFrom) params.set('year_from', yFrom);
+      if (yTo) params.set('year_to', yTo);
+      if (theme) params.append('theme', theme);
+
+      try {
+        const t0 = performance.now();
+        const res = await fetch(`/search?${params.toString()}`);
+        const data = await res.json();
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+
+        if (data.error) {
+          showError(data.error);
+          return;
+        }
+
+        currentResults = data.results || [];
+        renderResults(currentResults, elapsed);
+      } catch (err) {
+        showError('Σφάλμα κατά την αναζήτηση: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Αναζήτηση';
+      }
+    }
+
+    function renderResults(results, elapsed) {
+      const container = document.getElementById('resultsContainer');
+      document.getElementById('searchMeta').textContent = `Βρέθηκαν ${results.length} αποφάσεις σε ${elapsed}s`;
+
+      if (results.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-12 text-slate-500 bg-white rounded-xl border border-slate-200">
+            <p class="text-sm font-semibold">Δεν βρέθηκαν αποτελέσματα για αυτό το ερώτημα.</p>
+            <p class="text-xs mt-1 text-slate-400">Δοκιμάστε με διαφορετικές λέξεις-κλειδιά ή διευρύνετε τα φίλτρα.</p>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = results.map((r, i) => `
+        <div class="bg-white rounded-xl border border-slate-200 p-5 hover:shadow-md transition">
+          <div class="flex items-start justify-between gap-3 mb-2">
+            <div>
+              <span class="inline-block px-2.5 py-0.5 bg-brand-900 text-white font-bold text-xs rounded shadow-sm mr-2">
+                ${r.citation}
+              </span>
+              <span class="text-xs font-semibold text-slate-700">${r.category || ''}</span>
+              ${r.chamber ? `<span class="text-xs text-slate-500 ml-1">(${r.chamber})</span>` : ''}
+              <span class="text-[11px] text-slate-400 ml-2">Score: ${r.score} (${(r.matched_by || []).join(', ')})</span>
+            </div>
+            <a href="${r.url}" target="_blank" class="text-accent-600 hover:text-accent-700 text-xs font-medium whitespace-nowrap">
+              areiospagos.gr ↗
+            </a>
+          </div>
+
+          ${r.subject ? `
+            <div class="text-xs text-amber-900 bg-amber-50 border border-amber-200/60 rounded px-2.5 py-1 mb-2 font-medium">
+              Θέμα: ${r.subject}
+            </div>
+          ` : ''}
+
+          ${r.summary ? `
+            <div class="text-xs text-slate-700 bg-slate-50 p-2.5 rounded-lg border border-slate-100 mb-3 leading-relaxed">
+              <span class="font-semibold text-slate-900 block mb-0.5">Περίληψη:</span>
+              ${r.summary}
+            </div>
+          ` : ''}
+
+          <!-- Passages -->
+          <div class="space-y-1.5 text-xs text-slate-600 mb-3 leading-relaxed">
+            ${(r.passages || []).map(p => `
+              <div class="border-l-2 border-accent-500 pl-2.5 py-0.5">
+                <span class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mr-1">${p.part}:</span>
+                ${p.text.replace(/\*\*(.*?)\*\*/g, '<mark class="font-semibold text-slate-900">$1</mark>')}
+              </div>
+            `).join('')}
+          </div>
+
+          <!-- Actions -->
+          <div class="flex justify-end pt-2 border-t border-slate-100">
+            <button onclick="viewDecision('${r.cd}')" class="text-xs font-semibold text-brand-900 hover:text-accent-600 flex items-center gap-1 transition">
+              📄 Ανάγνωση Πλήρους Κειμένου &rarr;
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function showError(msg) {
+      const container = document.getElementById('resultsContainer');
+      container.innerHTML = `
+        <div class="p-4 bg-red-50 border border-red-200 text-red-800 rounded-xl text-xs">
+          <strong>Σφάλμα:</strong> ${msg}
+        </div>
+      `;
+    }
+
+    async function viewDecision(cd) {
+      try {
+        const res = await fetch(`/decisions/${cd}`);
+        const d = await res.json();
+        document.getElementById('modalCitation').textContent = `Απόφαση ${d.number}/${d.year}`;
+        document.getElementById('modalMeta').textContent = `${d.category || ''} • Τμήμα ${d.chamber || ''}`;
+        
+        const subjBox = document.getElementById('modalSubjectBox');
+        if (d.subject) {
+          document.getElementById('modalSubject').textContent = d.subject;
+          subjBox.classList.remove('hidden');
+        } else {
+          subjBox.classList.add('hidden');
+        }
+
+        const sumBox = document.getElementById('modalSummaryBox');
+        if (d.summary) {
+          document.getElementById('modalSummary').textContent = d.summary;
+          sumBox.classList.remove('hidden');
+        } else {
+          sumBox.classList.add('hidden');
+        }
+
+        document.getElementById('modalBody').textContent = d.body || 'Δεν υπάρχει κείμενο.';
+        document.getElementById('modalExternalLink').href = d.source_url;
+        currentDecisionText = `${d.number}/${d.year}\n\n${d.subject || ''}\n\n${d.summary || ''}\n\n${d.body || ''}`;
+        document.getElementById('decisionModal').classList.remove('hidden');
+      } catch (err) {
+        alert('Αδυναμία φόρτωσης απόφασης: ' + err.message);
+      }
+    }
+
+    function closeDecisionModal() {
+      document.getElementById('decisionModal').classList.add('hidden');
+    }
+
+    function copyDecisionText() {
+      navigator.clipboard.writeText(currentDecisionText);
+      alert('Το κείμενο της απόφασης αντιγράφηκε στο πρόχειρο.');
+    }
+
+    // API Key modal
+    function openConfigModal() {
+      document.getElementById('configModal').classList.remove('hidden');
+    }
+    function closeConfigModal() {
+      document.getElementById('configModal').classList.add('hidden');
+    }
+
+    async function saveApiKey() {
+      const key = document.getElementById('inputApiKey').value.trim();
+      if (!key) return;
+
+      const btn = document.getElementById('btnSaveKey');
+      const msg = document.getElementById('apiKeyMsg');
+      btn.disabled = true;
+      btn.textContent = 'Έλεγχος...';
+
+      try {
+        const res = await fetch('/api/config/key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: key })
+        });
+        const d = await res.json();
+        if (d.success) {
+          msg.textContent = '✅ Το κλειδί ελέγχθηκε και αποθηκεύτηκε επιτυχώς!';
+          msg.className = 'text-xs mb-4 text-emerald-700 bg-emerald-50 p-2 rounded';
+          msg.classList.remove('hidden');
+          setTimeout(() => {
+            closeConfigModal();
+            checkApiKey();
+          }, 1200);
+        } else {
+          msg.textContent = '❌ Σφάλμα: ' + (d.error || 'Άκυρο κλειδί API');
+          msg.className = 'text-xs mb-4 text-red-700 bg-red-50 p-2 rounded';
+          msg.classList.remove('hidden');
+        }
+      } catch (err) {
+        msg.textContent = '❌ Σφάλμα σύνδεσης: ' + err.message;
+        msg.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Δοκιμή & Αποθήκευση';
+      }
+    }
+
+    // MCP Modal
+    function openMcpModal() {
+      document.getElementById('mcpModal').classList.remove('hidden');
+    }
+    function closeMcpModal() {
+      document.getElementById('mcpModal').classList.add('hidden');
+    }
+    function copyMcpJson() {
+      const text = document.getElementById('mcpConfigText').textContent;
+      navigator.clipboard.writeText(text);
+      const btn = document.getElementById('btnCopyMcp');
+      btn.textContent = '✅ Αντιγράφηκε!';
+      setTimeout(() => btn.textContent = '📋 Αντιγραφή JSON', 2000);
+    }
+
+    // Backfill Calculator
+    function openBackfillModal() {
+      document.getElementById('backfillModal').classList.remove('hidden');
+      updateBackfillEstimate();
+    }
+    function closeBackfillModal() {
+      document.getElementById('backfillModal').classList.add('hidden');
+    }
+
+    function updateBackfillEstimate() {
+      const from = parseInt(document.getElementById('bfYearFrom').value) || 2018;
+      const to = parseInt(document.getElementById('bfYearTo').value) || 2023;
+      if (from > to) return;
+
+      const years = to - from + 1;
+      // Approx 2,800 decisions per year for modern years
+      const estDec = years * 2800;
+      const estCh = estDec * 22;
+      const estTokens = estCh * 450;
+      // $0.15 per 1M tokens
+      const estDollars = (estTokens / 1000000) * 0.15;
+      const estHours = ((estDec * 2.2) / 3600).toFixed(1);
+
+      document.getElementById('estDecisions').textContent = `~${estDec.toLocaleString()} αποφάσεις`;
+      document.getElementById('estChunks').textContent = `~${estCh.toLocaleString()} αποσπάσματα`;
+      document.getElementById('estTime').textContent = `~${estHours} ώρες`;
+      document.getElementById('estCost').textContent = `~$${estDollars.toFixed(2)} USD`;
+    }
+
+    async function startBackfill() {
+      const from = parseInt(document.getElementById('bfYearFrom').value);
+      const to = parseInt(document.getElementById('bfYearTo').value);
+      
+      const btn = document.getElementById('btnStartBackfill');
+      btn.disabled = true;
+      document.getElementById('backfillProgress').classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/sync/backfill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ year_from: from, year_to: to })
+        });
+        const d = await res.json();
+        document.getElementById('bfStatusText').textContent = d.message || 'Η ανάκτηση ξεκίνησε στο παρασκήνιο!';
+      } catch (err) {
+        alert('Σφάλμα: ' + err.message);
+      }
+    }
+
+    async function triggerSync() {
+      const btn = document.getElementById('btnSyncPoll');
+      const icon = document.getElementById('syncIcon');
+      icon.classList.add('animate-spin');
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/sync/poll', { method: 'POST' });
+        const d = await res.json();
+        alert(d.message || 'Ο έλεγχος ολοκληρώθηκε!');
+        loadCorpusStats();
+      } catch (err) {
+        alert('Σφάλμα κατά τον έλεγχο: ' + err.message);
+      } finally {
+        icon.classList.remove('animate-spin');
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

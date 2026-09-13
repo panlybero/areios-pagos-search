@@ -269,6 +269,79 @@ def cli_themes(
 
 
 # ------------------------------------------------------------------ serving
+@app.command("launch")
+def cli_launch(
+    host: str = typer.Option("127.0.0.1", help="Host to bind Web UI"),
+    port: int = typer.Option(8765, help="Port for Web UI"),
+    mcp_port: int = typer.Option(8766, help="Port for MCP server"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open browser"),
+    no_sync: bool = typer.Option(False, "--no-sync", help="Don't auto-check for new rulings on launch"),
+) -> None:
+    """Launch the full desktop application (Web UI + MCP server + auto-sync)."""
+    import threading
+    import time
+    import webbrowser
+
+    import uvicorn
+
+    from apsearch.db import migrate
+    from apsearch.logging import get_logger
+
+    log = get_logger("apsearch.app")
+
+    # 1. Ensure DB schema exists
+    migrate()
+
+    # 2. Start MCP server in background thread on mcp_port
+    def _run_mcp():
+        from apsearch.mcp.server import run as run_mcp
+
+        try:
+            run_mcp(transport="http", host="0.0.0.0", port=mcp_port)
+        except Exception as exc:
+            log.warning("MCP server background start failed: %s", exc)
+
+    mcp_thread = threading.Thread(target=_run_mcp, daemon=True)
+    mcp_thread.start()
+
+    # 3. Optional auto-sync on launch in background thread
+    if not no_sync and settings.gemini_api_key:
+
+        def _bg_startup_sync():
+            time.sleep(3)
+            try:
+                from apsearch.crawler.pipeline import run_incremental
+                from apsearch.index.build import run_index
+
+                log.info("Checking for new rulings published since last launch...")
+                run_incremental(lookback_years=1)
+                run_index()
+            except Exception as exc:
+                log.debug("Startup sync check: %s", exc)
+
+        sync_thread = threading.Thread(target=_bg_startup_sync, daemon=True)
+        sync_thread.start()
+
+    # 4. Open browser
+    if not no_browser:
+
+        def _open_tab():
+            time.sleep(1.2)
+            webbrowser.open(f"http://{host}:{port}")
+
+        threading.Thread(target=_open_tab, daemon=True).start()
+
+    console.print(f"[bold green]Areios Pagos Search running at:[/bold green] http://{host}:{port}")
+    console.print(f"[bold cyan]MCP server active at:[/bold cyan] http://localhost:{mcp_port}/mcp")
+
+    uvicorn.run(
+        "apsearch.api.main:app",
+        host=host,
+        port=port,
+        log_config=None,
+    )
+
+
 @app.command("serve")
 def cli_serve(
     host: str = typer.Option(None), port: int = typer.Option(None)

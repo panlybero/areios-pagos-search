@@ -6,6 +6,8 @@ from collections.abc import Iterable
 
 from psycopg.rows import dict_row
 
+from apsearch import repo_sqlite
+from apsearch.config import settings
 from apsearch.crawler.discover import CATEGORIES, CHAMBERS
 from apsearch.crawler.fetch import content_hash, decision_url
 from apsearch.crawler.parse import Decision, DecisionRef, Theme, fold_greek
@@ -32,6 +34,8 @@ def chamber_id(label: str | None) -> int | None:
 
 
 def upsert_themes(themes: Iterable[Theme]) -> int:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.upsert_themes(themes)
     rows = [(t.code, t.label, t.slug) for t in themes]
     if not rows:
         return 0
@@ -49,6 +53,8 @@ def upsert_themes(themes: Iterable[Theme]) -> int:
 
 def link_theme(code: int, cds: Iterable[str]) -> int:
     """Attach a subject heading to decisions we already hold."""
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.link_theme(code, cds)
     cds = list(cds)
     if not cds:
         return 0
@@ -75,6 +81,8 @@ def link_theme(code: int, cds: Iterable[str]) -> int:
 
 
 def themes_needing_crawl(max_age_days: int = 30) -> list[dict]:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.themes_needing_crawl(max_age_days)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -94,6 +102,8 @@ def themes_needing_crawl(max_age_days: int = 30) -> list[dict]:
 
 
 def known_cds(cds: Iterable[str]) -> set[str]:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.known_cds(cds)
     cds = list(cds)
     if not cds:
         return set()
@@ -104,6 +114,8 @@ def known_cds(cds: Iterable[str]) -> set[str]:
 
 def enqueue(refs: Iterable[DecisionRef]) -> int:
     """Queue newly discovered decisions whose text we do not have yet."""
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.enqueue(refs)
     refs = list(refs)
     if not refs:
         return 0
@@ -128,6 +140,8 @@ def enqueue(refs: Iterable[DecisionRef]) -> int:
 
 
 def take_queue(limit: int) -> list[dict]:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.take_queue(limit)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -143,11 +157,15 @@ def take_queue(limit: int) -> list[dict]:
 
 
 def dequeue(cd: str) -> None:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.dequeue(cd)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM fetch_queue WHERE cd = %s", (cd,))
 
 
 def mark_queue_error(cd: str, error: str) -> None:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.mark_queue_error(cd, error)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -160,6 +178,8 @@ def mark_queue_error(cd: str, error: str) -> None:
 
 
 def queue_depth() -> int:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.queue_depth()
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM fetch_queue WHERE attempts < 5")
         return cur.fetchone()["n"]
@@ -172,6 +192,8 @@ def queue_depth() -> int:
 
 def upsert_decision(dec: Decision) -> str:
     """Insert or update a decision. Returns 'new' | 'changed' | 'unchanged'."""
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.upsert_decision(dec)
     chash = content_hash(dec.body)
     url = decision_url(dec.cd, dec.number, dec.year)
     with pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -242,6 +264,8 @@ def upsert_decision(dec: Decision) -> str:
 
 
 def decision_count() -> int:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.decision_count()
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) AS n FROM decision")
         return cur.fetchone()["n"]
@@ -256,6 +280,10 @@ def record_partition(
     year: int, category_id_: int, chamber_id_: int, n_found: int, truncated: bool,
     status: str = "done", error: str | None = None,
 ) -> None:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.record_partition(
+            year, category_id_, chamber_id_, n_found, truncated, status, error
+        )
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -272,6 +300,8 @@ def record_partition(
 
 
 def year_is_done(year: int) -> bool:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.year_is_done(year)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -285,12 +315,16 @@ def year_is_done(year: int) -> bool:
 
 
 def start_run(kind: str) -> int:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.start_run(kind)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO crawl_run (kind) VALUES (%s) RETURNING id", (kind,))
         return cur.fetchone()["id"]
 
 
 def finish_run(run_id: int, **counts) -> None:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.finish_run(run_id, **counts)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -311,6 +345,8 @@ def finish_run(run_id: int, **counts) -> None:
 
 
 def stats() -> dict:
+    if settings.db_backend == "sqlite":
+        return repo_sqlite.stats()
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """

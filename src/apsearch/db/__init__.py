@@ -59,6 +59,12 @@ def _schema_sql() -> str:
 
 def migrate(with_vector_index: bool = False) -> None:
     """Create/refresh the schema. Safe to run repeatedly."""
+    if settings.db_backend == "sqlite":
+        from apsearch.db.sqlite import init_sqlite_db
+
+        init_sqlite_db()
+        return
+
     dim = settings.embed_dim
     with connect() as conn, conn.cursor() as cur:
         cur.execute(_schema_sql())

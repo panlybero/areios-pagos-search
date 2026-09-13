@@ -265,6 +265,22 @@ def search(
     expand_query: bool = True,
     min_lexical_hits: int = 5,
 ) -> list[Result]:
+    if settings.db_backend == "sqlite":
+        from apsearch.search import hybrid_sqlite
+
+        return hybrid_sqlite.search(
+            query=query,
+            mode=mode,
+            limit=limit,
+            filters=filters,
+            weights=weights,
+            candidate_pool=candidate_pool,
+            passages_per_result=passages_per_result,
+            highlight=highlight,
+            expand_query=expand_query,
+            min_lexical_hits=min_lexical_hits,
+        )
+
     limit = limit or settings.default_limit
     filters = filters or Filters()
     pool_size = candidate_pool or settings.candidate_pool
@@ -494,6 +510,13 @@ def get_decision(
     include_body: bool = True,
 ) -> list[dict]:
     """Fetch decisions by opaque id or by citation (number/year)."""
+    if settings.db_backend == "sqlite":
+        from apsearch.search import hybrid_sqlite
+
+        return hybrid_sqlite.get_decision(
+            cd=cd, number=number, year=year, chamber=chamber, include_body=include_body
+        )
+
     clauses, params = [], {}
     if cd:
         clauses.append("d.cd = %(cd)s")
@@ -528,6 +551,11 @@ def get_decision(
 
 
 def list_themes(prefix: str | None = None, limit: int = 100) -> list[dict]:
+    if settings.db_backend == "sqlite":
+        from apsearch.search import hybrid_sqlite
+
+        return hybrid_sqlite.list_themes(prefix=prefix, limit=limit)
+
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """

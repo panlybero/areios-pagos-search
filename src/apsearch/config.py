@@ -8,12 +8,35 @@ for a GCP SDK -- the cloud-specific bits are isolated behind
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from urllib.parse import quote
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def user_config_path() -> Path:
+    return Path.home() / ".apsearch" / "config.json"
+
+
+def load_user_config() -> dict:
+    p = user_config_path()
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_user_config(updates: dict) -> None:
+    p = user_config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cfg = load_user_config()
+    cfg.update(updates)
+    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _resolve_env_files() -> tuple[Path, ...]:
@@ -51,6 +74,27 @@ class Settings(BaseSettings):
     log_json: bool | None = None
 
     # ---------------------------------------------------------------- database
+    #: "sqlite" (default standalone portable single-file engine, zero setup)
+    #: or "postgres" (server/cloud with pgvector)
+    db_backend: str = "sqlite"
+    sqlite_path: str = "data/areios_pagos.db"
+
+    @property
+    def sqlite_file(self) -> Path:
+        p = Path(self.sqlite_path)
+        if p.is_absolute():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+        # If running inside or next to the repo directory, use repo's data/
+        repo_data = Path(__file__).resolve().parents[2] / self.sqlite_path
+        if repo_data.parent.is_dir():
+            repo_data.parent.mkdir(parents=True, exist_ok=True)
+            return repo_data
+        # Otherwise use standard user data directory
+        user_dir = Path.home() / ".apsearch"
+        user_dir.mkdir(parents=True, exist_ok=True)
+        return user_dir / p.name
+
     pg_host: str = "localhost"
     pg_port: int = 5433
     pg_user: str = "apsearch"
@@ -129,7 +173,14 @@ class Settings(BaseSettings):
     # -- Gemini backend --
     #: NEVER commit this. Locally: .env (gitignored). On GCP: Secret Manager
     #: mounted as an env var on the Cloud Run service/job.
-    gemini_api_key: str = ""
+    gemini_api_key: str = Field(
+        default_factory=lambda: (
+            load_user_config().get("gemini_api_key")
+            or os.environ.get("APSEARCH_GEMINI_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or ""
+        )
+    )
     gemini_embed_model: str = "gemini-embedding-2"
     gemini_concurrency: int = 4
     gemini_rpm: int = 0          # 0 = no client-side cap; raise if you hit 429s
