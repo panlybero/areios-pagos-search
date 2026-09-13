@@ -1,0 +1,61 @@
+[project]
+name = "apsearch"
+version = "0.1.0"
+description = "Semantic + keyword search over Areios Pagos (Greek Supreme Court) case law"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.27",
+    "selectolax>=0.3.21",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "rich>=13.7",
+    "tenacity>=8.3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+embed = [
+    "fastembed>=0.4.2",
+]
+api = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+]
+mcp = [
+    "mcp>=1.2",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+apsearch = "apsearch.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/apsearch"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Callables in argument defaults are the documented FastAPI / Typer idiom.
+"src/apsearch/api/*.py" = ["B008"]
+"src/apsearch/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
