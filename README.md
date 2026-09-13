@@ -150,10 +150,15 @@ apsearch mcp [--transport stdio|http]
 ```
 
 Tools: `search_decisions`, `get_decision`, `list_themes`, `corpus_stats`.
+Verified against protocol `2025-11-25` over a real stdio handshake.
 
 Search returns metadata plus matching passages, never full texts — a single
 decision runs to ~37k characters. Agents fetch full text only for the
 decisions they actually need.
+
+Use an absolute path to the executable: MCP clients do not run a login shell.
+See [`docs/mcp.md`](docs/mcp.md) for remote (streamable-HTTP) setup and the
+tool-design rationale.
 
 ## Embedding backends
 
@@ -189,8 +194,11 @@ abstract of exactly what the decision holds.
 ## Tests
 
 ```bash
-pytest            # 60 tests, no network, no database
+pytest            # 70 tests; 60 need neither network nor database
 ```
+
+Integration tests auto-skip when no Postgres is reachable
+(`docker compose up -d && apsearch db migrate` to enable them).
 
 Parser tests run against saved fixtures. Note `test_no_runaway_duplication`:
 the chunker once emitted 757 overlapping spans for one decision (2.1x text

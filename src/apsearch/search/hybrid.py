@@ -496,9 +496,20 @@ def list_themes(prefix: str | None = None, limit: int = 100) -> list[dict]:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT code, label, n_decisions FROM theme
-             WHERE (%(p)s IS NULL OR label ILIKE %(p)s)
-             ORDER BY n_decisions DESC, label
+            SELECT t.code, t.label,
+                   -- Counted live rather than read from theme.n_decisions:
+                   -- that column is only refreshed by a thematic crawl, so it
+                   -- goes stale as soon as decisions are linked by any other
+                   -- path. Agents rank themes by this number, so it has to be
+                   -- true. decision_theme_by_theme makes it cheap.
+                   count(dt.cd) AS n_decisions
+              FROM theme t
+              LEFT JOIN decision_theme dt ON dt.theme_code = t.code
+             -- Casts are required: Postgres cannot infer a parameter's type
+             -- from `$1 IS NULL` alone and raises AmbiguousParameter.
+             WHERE (%(p)s::text IS NULL OR t.label ILIKE %(p)s::text)
+             GROUP BY t.code, t.label
+             ORDER BY count(dt.cd) DESC, t.label
              LIMIT %(lim)s
             """,
             {"p": f"%{prefix}%" if prefix else None, "lim": limit},
