@@ -91,21 +91,31 @@ def build_server():
         not full texts -- follow up with get_decision."""
         from apsearch.search.hybrid import Filters, search
 
-        results = search(
-            query,
-            mode=mode,
-            limit=limit,
-            filters=Filters(
-                year_from=year_from, year_to=year_to, category=category,
-                chamber=chamber, themes=list(themes or []),
-            ),
-        )
-        return {
-            "query": query,
-            "mode": mode,
-            "count": len(results),
-            "results": [r.to_dict() for r in results],
-        }
+        try:
+            results = search(
+                query,
+                mode=mode,
+                limit=limit,
+                filters=Filters(
+                    year_from=year_from, year_to=year_to, category=category,
+                    chamber=chamber, themes=list(themes or []),
+                ),
+            )
+            return {
+                "query": query,
+                "mode": mode,
+                "count": len(results),
+                "results": [r.to_dict() for r in results],
+            }
+        except Exception as exc:
+            log.exception("search_decisions failed for %r: %s", query, exc)
+            return {
+                "error": f"search failed: {exc}",
+                "query": query,
+                "mode": mode,
+                "count": 0,
+                "results": [],
+            }
 
     @mcp.tool()
     def get_decision(

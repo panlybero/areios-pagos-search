@@ -9,15 +9,39 @@ for a GCP SDK -- the cloud-specific bits are isolated behind
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import quote
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _resolve_env_files() -> tuple[Path, ...]:
+    """Find .env files regardless of the caller's current working directory.
+
+    When spawned via SSH or outside the repository root (e.g. from an agent or
+    OpenWork whose cwd is $HOME), a relative ".env" would fail to find the
+    configuration and fall back to defaults. We look in:
+      1. Repo root (.env next to pyproject.toml)
+      2. ~/.config/apsearch/.env
+      3. Current working directory .env (highest precedence)
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root / ".env",
+        Path.home() / ".config" / "apsearch" / ".env",
+        Path.cwd() / ".env",
+    ]
+    unique: list[Path] = []
+    for c in candidates:
+        if c.is_file() and c.resolve() not in [u.resolve() for u in unique]:
+            unique.append(c)
+    return tuple(unique) if unique else (Path(".env"),)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_prefix="APSEARCH_", extra="ignore"
+        env_file=_resolve_env_files(), env_prefix="APSEARCH_", extra="ignore"
     )
 
     env: str = "local"  # local | cloud

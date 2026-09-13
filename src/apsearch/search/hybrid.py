@@ -170,7 +170,30 @@ def _doc_lexical(cur, qexpr: str, qparams: dict, where: str,
     return cur.fetchall()
 
 
+def _check_vector_dim(cur, qvec) -> None:
+    query_dim = qvec.dimensions() if hasattr(qvec, "dimensions") else len(qvec)
+    cur.execute(
+        """
+        SELECT atttypmod AS dim
+          FROM pg_attribute
+         WHERE attrelid = 'chunk'::regclass AND attname = 'embedding'
+        """
+    )
+    row = cur.fetchone()
+    stored_dim = row["dim"] if row else -1
+    if stored_dim > 0 and stored_dim != query_dim:
+        cur.execute("SELECT value FROM index_meta WHERE key = 'embedding'")
+        meta = cur.fetchone()
+        meta_val = meta["value"] if meta else "unknown"
+        raise ValueError(
+            f"Embedding dimension mismatch: query vector has {query_dim} dims, "
+            f"but database index has {stored_dim} dims (indexed as '{meta_val}'). "
+            f"Set APSEARCH_EMBED_BACKEND and APSEARCH_EMBED_DIM to match."
+        )
+
+
 def _semantic(cur, qvec, where: str, params: dict, pool_size: int):
+    _check_vector_dim(cur, qvec)
     cur.execute(
         f"""
         SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part,
