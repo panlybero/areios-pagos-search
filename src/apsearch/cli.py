@@ -258,7 +258,7 @@ def cli_serve(
 
 @app.command("mcp")
 def cli_mcp(
-    transport: str = typer.Option("stdio", help="stdio | http"),
+    transport: str = typer.Option("stdio", help="stdio | http | sse"),
     host: str = typer.Option(None), port: int = typer.Option(None),
 ) -> None:
     """Run the MCP server (for Claude, agents, etc.)."""

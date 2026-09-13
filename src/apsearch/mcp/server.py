@@ -185,7 +185,15 @@ def run(transport: str = "stdio", host: str = "0.0.0.0", port: int = 8080) -> No
             mcp.settings.port = port
             mcp.run(transport="streamable-http")
         return
-    raise ValueError(f"unknown transport {transport!r} (expected stdio | http)")
+    if transport == "sse":
+        if generation >= 2:
+            mcp.run(transport="sse", host=host, port=port)
+        else:
+            mcp.settings.host = host
+            mcp.settings.port = port
+            mcp.run(transport="sse")
+        return
+    raise ValueError(f"unknown transport {transport!r} (expected stdio | http | sse)")
 
 
 if __name__ == "__main__":

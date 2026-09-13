@@ -1,0 +1,17 @@
+[Unit]
+Description=Areios Pagos Search - MCP Server (Tailscale accessible)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/areios-pagos-search
+# Binds to all interfaces (accessible on Tailscale IP 100.70.245.77 or panagiotis-mini-pc)
+ExecStart=%h/workspace/areios-pagos-search/.venv/bin/apsearch mcp --transport sse --host 0.0.0.0 --port 8766
+Restart=on-failure
+RestartSec=5
+
+# Optional: if you want the streamable-http protocol instead of sse, change `--transport sse` to `--transport http`
+
+[Install]
+WantedBy=default.target
