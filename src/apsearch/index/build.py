@@ -196,6 +196,7 @@ def reset_index() -> None:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("DROP INDEX IF EXISTS chunk_embedding_idx")
         cur.execute("TRUNCATE chunk RESTART IDENTITY")
+        cur.execute("TRUNCATE query_cache")
         cur.execute("UPDATE decision SET indexed_hash = NULL")
         cur.execute("DELETE FROM index_meta WHERE key = 'embedding'")
-    log.info("index reset; embedding model/dimension can now be changed")
+    log.info("index and query cache reset; embedding model/dimension can now be changed")

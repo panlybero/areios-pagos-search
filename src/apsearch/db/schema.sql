@@ -20,17 +20,22 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- Recall gaps left by the stemmer are covered by dense vector search.
 -- ----------------------------------------------------------------------------
 
-DROP TEXT SEARCH CONFIGURATION IF EXISTS el_stem CASCADE;
-CREATE TEXT SEARCH CONFIGURATION el_stem (COPY = greek);
-ALTER TEXT SEARCH CONFIGURATION el_stem
-    ALTER MAPPING FOR hword, hword_part, word, asciiword, asciihword
-    WITH unaccent, greek_stem;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'el_stem') THEN
+        CREATE TEXT SEARCH CONFIGURATION el_stem (COPY = greek);
+        ALTER TEXT SEARCH CONFIGURATION el_stem
+            ALTER MAPPING FOR hword, hword_part, word, asciiword, asciihword
+            WITH unaccent, greek_stem;
+    END IF;
 
-DROP TEXT SEARCH CONFIGURATION IF EXISTS el_exact CASCADE;
-CREATE TEXT SEARCH CONFIGURATION el_exact (COPY = simple);
-ALTER TEXT SEARCH CONFIGURATION el_exact
-    ALTER MAPPING FOR hword, hword_part, word, asciiword, asciihword
-    WITH unaccent, simple;
+    IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'el_exact') THEN
+        CREATE TEXT SEARCH CONFIGURATION el_exact (COPY = simple);
+        ALTER TEXT SEARCH CONFIGURATION el_exact
+            ALTER MAPPING FOR hword, hword_part, word, asciiword, asciihword
+            WITH unaccent, simple;
+    END IF;
+END $$;
 
 -- ----------------------------------------------------------------------------
 -- Reference data
@@ -169,6 +174,23 @@ CREATE TABLE IF NOT EXISTS index_meta (
     value      text NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ----------------------------------------------------------------------------
+-- Query embedding cache (prevents repeat API costs; bounded by LRU cleanup)
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS query_cache (
+    query_hash     text PRIMARY KEY,      -- sha256(model_sig + '\n' + normalized_query)
+    model_sig      text NOT NULL,          -- e.g. 'gemini:gemini-embedding-2:768'
+    query_text     text NOT NULL,
+    embedding      vector,                -- dimension matches chunk.embedding
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    last_accessed  timestamptz NOT NULL DEFAULT now(),
+    access_count   integer NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS query_cache_lru_idx ON query_cache (last_accessed);
+CREATE INDEX IF NOT EXISTS query_cache_model_idx ON query_cache (model_sig);
 
 -- ----------------------------------------------------------------------------
 -- Crawl bookkeeping

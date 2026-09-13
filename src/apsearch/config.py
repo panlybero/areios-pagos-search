@@ -145,6 +145,16 @@ class Settings(BaseSettings):
     rrf_k: int = 60
     candidate_pool: int = 200
 
+    # ------------------------------------------------------------ query cache
+    query_cache_enabled: bool = True
+    #: Max number of cached query vectors to retain in Postgres.
+    #: 20,000 queries ≈ 65 MB. An LRU prune runs whenever this cap is reached.
+    query_cache_max_entries: int = 20000
+    #: Auto-expire cached queries not accessed within this many days.
+    query_cache_ttl_days: int = 60
+    #: Maximum query character length allowed (prevents prompt-stuffing abuse).
+    max_query_chars: int = 600
+
     # -------------------------------------------------------------------- http
     #: Cloud Run injects PORT; honour it.
     port: int = Field(default_factory=lambda: int(os.environ.get("PORT", "8080")))

@@ -29,6 +29,7 @@ from apsearch.config import settings
 from apsearch.db import pool
 from apsearch.index.embed import get_backend
 from apsearch.logging import get_logger
+from apsearch.search import cache
 from apsearch.search import query as qbuild
 
 log = get_logger(__name__)
@@ -269,15 +270,14 @@ def search(
     pool_size = candidate_pool or settings.candidate_pool
     where, params = filters.where()
     query = (query or "").strip()
+    if len(query) > settings.max_query_chars:
+        raise ValueError(
+            f"Query is too long ({len(query)} > {settings.max_query_chars} chars). "
+            "Please provide a concise legal search query."
+        )
 
     use_lexical = mode in ("hybrid", "keyword") and bool(query)
     use_semantic = mode in ("hybrid", "semantic") and bool(query)
-
-    qvec = None
-    if use_semantic:
-        # Wrap in Vector so psycopg binds it as `vector`; a bare list would be
-        # adapted to float8[] and the <=> operator would not resolve.
-        qvec = Vector(get_backend().embed_queries([query])[0])
 
     with pool().connection() as conn:
         register_vector(conn)
@@ -288,6 +288,18 @@ def search(
                 "SELECT set_config('hnsw.ef_search', %s, true)",
                 (str(max(pool_size, 100)),),
             )
+
+            qvec = None
+            if use_semantic:
+                backend = get_backend()
+                model_sig = f"{settings.embed_backend}:{backend.name}:{backend.dim}"
+                # Check query cache first (avoids API calls and costs on repeated queries)
+                qvec = cache.get_cached_vector(cur, query, model_sig)
+                if qvec is None:
+                    # Cache miss: call embedding backend. Fails loudly if API fails.
+                    raw = backend.embed_queries([query])[0]
+                    qvec = Vector(raw)
+                    cache.store_cached_vector(cur, query, model_sig, qvec)
 
             chunk_rows: list[dict] = []
             vec_rows: list[dict] = []

@@ -52,6 +52,34 @@ def db_stats() -> None:
     console.print(Panel(t, title="apsearch", expand=False))
 
 
+@db_app.command("cache-stats")
+def db_cache_stats() -> None:
+    """Show query embedding cache statistics."""
+    from apsearch.db import pool
+    from apsearch.search.cache import cache_stats
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        s = cache_stats(cur)
+    t = Table(show_header=False, box=None)
+    for k, v in s.items():
+        t.add_row(f"[cyan]{k}[/cyan]", f"{v:,}" if isinstance(v, int) else str(v))
+    console.print(Panel(t, title="query cache", expand=False))
+
+
+@db_app.command("prune-cache")
+def db_prune_cache(
+    max_entries: int = typer.Option(None, help="Max entries to retain (LRU)"),
+    ttl_days: int = typer.Option(None, help="Purge queries older than N days"),
+) -> None:
+    """Evict expired and LRU queries from the cache to reclaim disk space."""
+    from apsearch.db import pool
+    from apsearch.search.cache import prune_query_cache
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        deleted = prune_query_cache(cur, max_entries=max_entries, ttl_days=ttl_days)
+    console.print(f"[green]pruned[/green] {deleted:,} cached queries")
+
+
 # ------------------------------------------------------------------- crawl
 @crawl_app.command("backfill")
 def crawl_backfill(

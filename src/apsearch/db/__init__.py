@@ -7,6 +7,7 @@ from importlib import resources
 from typing import Any
 
 import psycopg
+from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -22,8 +23,9 @@ def pool() -> ConnectionPool:
         if _pool is None:
             _pool = ConnectionPool(
                 settings.dsn,
-                min_size=1,
-                max_size=8,
+                min_size=settings.pool_min_size,
+                max_size=settings.pool_max_size,
+                configure=register_vector,
                 kwargs={"row_factory": dict_row},
                 open=True,
             )
@@ -32,7 +34,9 @@ def pool() -> ConnectionPool:
 
 def connect() -> psycopg.Connection:
     """A standalone connection (used for long-running maintenance statements)."""
-    return psycopg.connect(settings.dsn, row_factory=dict_row, autocommit=True)
+    conn = psycopg.connect(settings.dsn, row_factory=dict_row, autocommit=True)
+    register_vector(conn)
+    return conn
 
 
 def query(sql: str, params: Any = None) -> list[dict]:
@@ -79,6 +83,19 @@ def migrate(with_vector_index: bool = False) -> None:
                 )
             cur.execute("DROP INDEX IF EXISTS chunk_embedding_idx")
             cur.execute(f"ALTER TABLE chunk ALTER COLUMN embedding TYPE vector({dim})")
+
+        # Also pin query_cache.embedding dimension
+        cur.execute(
+            """
+            SELECT atttypmod AS typmod
+            FROM pg_attribute
+            WHERE attrelid = 'query_cache'::regclass AND attname = 'embedding'
+            """
+        )
+        qc_row = cur.fetchone()
+        if qc_row and qc_row["typmod"] != dim:
+            cur.execute("TRUNCATE query_cache")
+            cur.execute(f"ALTER TABLE query_cache ALTER COLUMN embedding TYPE vector({dim})")
 
         if with_vector_index:
             create_vector_index(cur)
