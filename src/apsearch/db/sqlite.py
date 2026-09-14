@@ -12,6 +12,8 @@ Key differences from Postgres
 
 from __future__ import annotations
 
+import re
+import time
 import unicodedata
 from pathlib import Path
 
@@ -60,46 +62,181 @@ def fold_greek(s: str | None) -> str:
     return unicodedata.normalize("NFC", s).lower().replace("ς", "σ")
 
 
+#: Where the pre-built corpus lives. Bumping this requires a matching release
+#: with these two exact asset names (GitHub caps a single release asset at 2GB,
+#: hence the split).
+SEED_RELEASE_TAG = "v0.3.0"
+SEED_RELEASE_BASE = (
+    f"https://github.com/panlybero/areios-pagos-search/releases/download/{SEED_RELEASE_TAG}"
+)
+SEED_PART_NAMES = ["areios_pagos_seed.db.gz.part-aa", "areios_pagos_seed.db.gz.part-ab"]
+
+#: The real corpus is ~7GB uncompressed with 26k+ decisions. Anything smaller
+#: or emptier than this is not our data -- most likely an empty schema that
+#: got auto-created by `sqlite3.connect()` on a path that was never seeded
+#: (e.g. the executable was launched directly rather than via launch.command,
+#: so the network fetch never ran).
+_MIN_HEALTHY_BYTES = 500_000_000
+_MIN_HEALTHY_DECISIONS = 1000
+
+
+def _db_is_healthy(db_path: Path) -> bool:
+    """Sanity-check that `db_path` actually holds the real corpus.
+
+    A SQLite file that merely *exists* proves nothing: `sqlite3.connect()`
+    silently creates an empty file for any path that doesn't exist yet, and
+    once a virtual table like `chunk_vec` is created inside it (possibly at
+    the wrong embedding dimension, if that happened before a config fix), it
+    persists forever across relaunches because every later `CREATE VIRTUAL
+    TABLE IF NOT EXISTS` is a silent no-op against it.
+    """
+    if not db_path.is_file() or db_path.stat().st_size < _MIN_HEALTHY_BYTES:
+        return False
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            n = conn.execute("SELECT count(*) FROM decision").fetchone()[0]
+            return n >= _MIN_HEALTHY_DECISIONS
+        finally:
+            conn.close()
+    except Exception:
+        return False  # missing table, corrupt file, locked, etc.
+
+
+def _discard_unhealthy_db(db_path: Path) -> None:
+    log.warning(
+        "Database at %s exists but does not look like the real corpus "
+        "(too small, or missing/empty tables) -- discarding and re-seeding.",
+        db_path,
+    )
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(f"{db_path}{suffix}")
+        if p.exists():
+            p.unlink()
+
+
+def _join_local_parts(search_dir: Path) -> Path | None:
+    import shutil
+
+    parts = sorted(search_dir.glob("areios_pagos_seed.db.gz.part-*"))
+    if not parts:
+        return None
+    target_gz = search_dir / "areios_pagos_seed_joined.db.gz"
+    log.info("Joining %d local seed parts into %s...", len(parts), target_gz)
+    with open(target_gz, "wb") as f_out:
+        for p in parts:
+            with open(p, "rb") as f_in:
+                shutil.copyfileobj(f_in, f_out)
+    return target_gz
+
+
+def _download_seed_from_github(dest_dir: Path) -> Path | None:
+    """Fetch the split seed archive parts straight from the GitHub release.
+
+    This is the fallback for the common real-world launch path: the user
+    double-clicks the compiled executable directly (or runs it from a
+    Terminal at an arbitrary cwd) rather than the `launch.command` wrapper
+    script, so the shell-level download-and-join logic there never runs.
+    Doing the fetch here in Python means the app is self-sufficient
+    regardless of how it was started.
+    """
+    try:
+        import httpx
+    except ImportError:
+        log.error("httpx not available; cannot download the seed database.")
+        return None
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    joined = dest_dir / "areios_pagos_seed_download.db.gz"
+    try:
+        with open(joined, "wb") as out:
+            for part_name in SEED_PART_NAMES:
+                # A cache-busting query param avoids ever getting stuck behind a
+                # stale negative (404) response GitHub's edge cached for the bare
+                # URL -- observed in practice shortly after a release/repo change.
+                url = f"{SEED_RELEASE_BASE}/{part_name}?t={int(time.time())}"
+                log.info("Downloading %s (this happens once)...", part_name)
+                with httpx.stream("GET", url, follow_redirects=True, timeout=180.0) as resp:
+                    resp.raise_for_status()
+                    total = int(resp.headers.get("content-length", 0))
+                    downloaded = 0
+                    last_logged = -1
+                    for chunk in resp.iter_bytes(chunk_size=4 * 1024 * 1024):
+                        out.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = downloaded * 100 // total
+                            if pct >= last_logged + 10:
+                                log.info("  %s: %d%% (%d MB / %d MB)",
+                                         part_name, pct, downloaded // (1024 * 1024),
+                                         total // (1024 * 1024))
+                                last_logged = pct
+        return joined
+    except Exception as exc:
+        log.error("Downloading the seed database failed: %s", exc)
+        joined.unlink(missing_ok=True)
+        return None
+
+
 def ensure_seed_db(db_path: Path) -> None:
-    """If the target database does not exist, initialize it from a seed archive if available."""
-    if db_path.is_file() and db_path.stat().st_size > 0:
+    """Make sure `db_path` holds the real pre-built corpus, fetching it if not."""
+    if _db_is_healthy(db_path):
         return
+    if db_path.exists():
+        _discard_unhealthy_db(db_path)
 
     import gzip
     import shutil
 
-    # Check for split multi-part archives (e.g. areios_pagos_seed.db.gz.part-aa, part-ab)
-    for search_dir in [
-        Path(__file__).resolve().parents[2] / "data",
-        Path.cwd() / "data",
-        Path.cwd(),
-    ]:
-        parts = sorted(search_dir.glob("areios_pagos_seed.db.gz.part-*"))
-        target_gz = search_dir / "areios_pagos_seed.db.gz"
-        if parts and not target_gz.is_file():
-            log.info("Joining %d seed parts into %s...", len(parts), target_gz)
-            with open(target_gz, "wb") as f_out:
-                for p in parts:
-                    with open(p, "rb") as f_in:
-                        shutil.copyfileobj(f_in, f_out)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    candidates = [
-        Path(__file__).resolve().parents[2] / "data" / "areios_pagos_seed.db.gz",
-        Path(__file__).resolve().parents[2] / "data" / "areios_pagos.db",
-        Path.cwd() / "data" / "areios_pagos_seed.db.gz",
-        Path.cwd() / "areios_pagos_seed.db.gz",
-    ]
-    for c in candidates:
-        if c.is_file():
-            log.info("Seeding initial database from %s -> %s", c, db_path)
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            if c.name.endswith(".gz"):
-                with gzip.open(c, "rb") as f_in, open(db_path, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-            else:
-                shutil.copyfile(c, db_path)
-            log.info("Database seeded successfully (%d bytes)", db_path.stat().st_size)
-            return
+    # 1. A plain, already-extracted database sitting next to the app.
+    for search_dir in (Path(__file__).resolve().parents[2] / "data", Path.cwd() / "data", Path.cwd()):
+        plain = search_dir / "areios_pagos.db"
+        if plain.is_file() and plain.resolve() != db_path.resolve():
+            log.info("Seeding from local database %s -> %s", plain, db_path)
+            shutil.copyfile(plain, db_path)
+            if _db_is_healthy(db_path):
+                return
+            _discard_unhealthy_db(db_path)
+
+    # 2. A local, already-downloaded .gz (whole or split into .part-*).
+    gz_source: Path | None = None
+    for search_dir in (Path(__file__).resolve().parents[2] / "data", Path.cwd() / "data", Path.cwd()):
+        whole = search_dir / "areios_pagos_seed.db.gz"
+        if whole.is_file():
+            gz_source = whole
+            break
+        joined = _join_local_parts(search_dir)
+        if joined is not None:
+            gz_source = joined
+            break
+
+    # 3. Nothing local: fetch it from the GitHub release ourselves.
+    if gz_source is None:
+        log.info(
+            "No local seed archive found -- downloading the pre-built case-law "
+            "database from GitHub (~2.5 GB, one-time)."
+        )
+        gz_source = _download_seed_from_github(db_path.parent)
+
+    if gz_source is None:
+        log.error(
+            "Could not obtain the seed database. Starting with an empty local "
+            "database -- search will find nothing until a backfill is run."
+        )
+        return
+
+    log.info("Extracting %s -> %s...", gz_source, db_path)
+    with gzip.open(gz_source, "rb") as f_in, open(db_path, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
+    if gz_source.name == "areios_pagos_seed_download.db.gz":
+        gz_source.unlink(missing_ok=True)  # one-time download artifact; the .db is what matters now
+
+    if _db_is_healthy(db_path):
+        log.info("Database seeded successfully (%d bytes)", db_path.stat().st_size)
+    else:
+        log.error("Seeded database still fails the health check -- something is wrong with the archive.")
 
 
 def connect(
@@ -284,7 +421,26 @@ def init_sqlite_db(conn: sqlite3.Connection | None = None) -> None:
             """
         )
 
-        # Vector virtual table
+        # Vector virtual table. `CREATE ... IF NOT EXISTS` is a silent no-op
+        # against an existing table, so if one already exists at a different
+        # dimension (e.g. an empty stub created before a config fix, or a
+        # switched embedding model), fail loudly here instead of letting it
+        # surface later as a cryptic dimension-mismatch error deep inside a
+        # search query.
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'chunk_vec' AND type = 'table'"
+        ).fetchone()
+        if existing is not None:
+            existing_sql = existing[0] or ""
+            m = re.search(r"float\[(\d+)\]", existing_sql)
+            if m and int(m.group(1)) != dim:
+                raise RuntimeError(
+                    f"chunk_vec already exists with {m.group(1)}-dimensional vectors, "
+                    f"but the configured embedding backend produces {dim}-dimensional "
+                    f"ones. This database is stale (likely created before a config fix, "
+                    f"or with a different embedding model). Delete it and relaunch to "
+                    f"re-seed automatically:\n  rm {settings.sqlite_file}*"
+                )
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(embedding float[{dim}])"
         )
