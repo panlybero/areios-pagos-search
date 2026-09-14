@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release tag name (e.g. v0.2.0)'
+        description: 'Release tag name (e.g. v0.3.1)'
         required: true
-        default: 'v0.2.0'
+        default: 'v0.3.1'
 
 permissions:
   contents: write
@@ -19,18 +19,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: windows-latest
-            artifact_name: AreiosPagos-windows-x64.zip
-            executable: dist/AreiosPagos/AreiosPagos.exe
           - os: macos-latest
             artifact_name: AreiosPagos-macos-arm64.zip
-            executable: dist/AreiosPagos/AreiosPagos
-          - os: macos-13
-            artifact_name: AreiosPagos-macos-x64.zip
-            executable: dist/AreiosPagos/AreiosPagos
-          - os: ubuntu-latest
-            artifact_name: AreiosPagos-linux-x64.tar.gz
-            executable: dist/AreiosPagos/AreiosPagos
+            binary_name: AreiosPagos
+          - os: windows-latest
+            artifact_name: AreiosPagos-windows-x64.zip
+            binary_name: AreiosPagos.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -45,38 +39,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install .[api,mcp] pyinstaller sqlite-vec
 
-      - name: Build executable with PyInstaller
+      - name: Build single standalone executable with PyInstaller
         shell: bash
         run: |
           sep=":"
           if [ "$RUNNER_OS" = "Windows" ]; then
             sep=";"
           fi
-          pyinstaller --name AreiosPagos --onedir --noconfirm \
+          pyinstaller --name AreiosPagos --onefile --noconfirm \
             --add-data "src/apsearch/api/templates/index.html${sep}apsearch/api/templates" \
-            --add-data "src/apsearch/db/schema.sql${sep}apsearch/db" \
             --collect-all sqlite_vec \
             --collect-all uvicorn \
             src/apsearch/main_entry.py
 
-      - name: Package release artifact
+      - name: Package single-executable release artifact
         shell: bash
         run: |
-          mkdir -p dist/AreiosPagos/data
-          if [ -f data/areios_pagos_seed.db.gz ]; then
-            cp data/areios_pagos_seed.db.gz dist/AreiosPagos/data/
-          fi
-          cp README.md dist/AreiosPagos/ || true
-
+          mkdir -p package
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp launch.bat dist/AreiosPagos/ || true
-            cd dist && powershell Compress-Archive -Path AreiosPagos -DestinationPath ${{ matrix.artifact_name }}
-          elif [ "$RUNNER_OS" = "Linux" ]; then
-            cp launch.sh dist/AreiosPagos/ || true
-            cd dist && tar -czf ${{ matrix.artifact_name }} AreiosPagos
+            cp dist/AreiosPagos.exe package/
+            cp launch.bat package/ || true
+            powershell Compress-Archive -Path package/* -DestinationPath dist/${{ matrix.artifact_name }}
           else
-            cp launch.sh dist/AreiosPagos/ || true
-            cd dist && zip -r ${{ matrix.artifact_name }} AreiosPagos
+            cp dist/AreiosPagos package/
+            chmod +x package/AreiosPagos
+            cp launch.command package/ || true
+            cp launch.sh package/ || true
+            cd package && zip -r ../dist/${{ matrix.artifact_name }} .
           fi
 
       - name: Upload Build Artifact
@@ -91,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all build artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -99,12 +88,7 @@ jobs:
       - name: Prepare assets for release
         run: |
           mkdir -p upload
-          find release-assets/ -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} upload/ \;
-          # Also package universal source launcher bundles
-          zip -j upload/AreiosPagos-Universal-Source.zip launch.sh launch.bat pyproject.toml README.md
-          if [ -f data/areios_pagos_seed.db.gz ]; then
-            cp data/areios_pagos_seed.db.gz upload/
-          fi
+          find release-assets/ -type f -name "*.zip" -exec cp {} upload/ \;
           ls -lh upload/
 
       - name: Create or Update GitHub Release
@@ -112,21 +96,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag_name || github.ref_name }}
         run: |
+          gh release upload "$TAG" upload/* --clobber || \
           gh release create "$TAG" upload/* \
             --title "Areios Pagos Search $TAG" \
-            --notes "### Άρειος Πάγος — Standalone Case Law Search & MCP Server
+            --notes "### Άρειος Πάγος — Standalone Case Law Search & MCP Server ($TAG)
 
           #### Available Packages:
-          * **Windows**: Download \`AreiosPagos-windows-x64.zip\`, extract and double-click \`AreiosPagos.exe\` (or run \`launch.bat\`).
-          * **macOS (Apple Silicon M1/M2/M3/M4)**: Download \`AreiosPagos-macos-arm64.zip\`, extract and run \`AreiosPagos\`.
-          * **macOS (Intel)**: Download \`AreiosPagos-macos-x64.zip\`, extract and run \`AreiosPagos\`.
-          * **Universal Source Bundle**: Download \`AreiosPagos-Universal-Source.zip\` and double-click \`launch.sh\` (Mac/Linux) or \`launch.bat\` (Windows).
+          * **macOS (Apple Silicon M1/M2/M3/M4)**: Download \`AreiosPagos-macos-arm64.zip\`, extract and run \`AreiosPagos\` (single executable).
+          * **Windows**: Download \`AreiosPagos-windows-x64.zip\`, extract and run \`AreiosPagos.exe\` (single executable).
+
+          #### Database Seed:
+          Download \`areios_pagos_seed.db.gz.part-aa\` and \`areios_pagos_seed.db.gz.part-ab\` attached to the release (the app launcher will also download them automatically on first start).
 
           #### Features:
-          * Pre-seeded with modern case law.
-          * Self-hosted single-file SQLite database with \`sqlite-vec\` vector embeddings and Greek FTS5 search.
-          * Local Web UI automatically opens in your browser at http://localhost:8765.
-          * Prompts for Gemini API key on first launch (saved locally).
-          * Connects directly to OpenWork, Claude Desktop, and Cursor via MCP at \`http://localhost:8766/mcp\`.
-          * Built-in cost calculator for historical backfills." || \
-          gh release upload "$TAG" upload/* --clobber
+          * Complete modern case law corpus (2018–2026, 26,324 rulings).
+          * Embedded SQLite engine with \`sqlite-vec\` vector embeddings and Greek FTS5 search.
+          * Local Web UI automatically opens in browser at http://localhost:8765.
+          * Connects directly to OpenWork, Claude Desktop, and Cursor via MCP at \`http://localhost:8766/mcp\`."

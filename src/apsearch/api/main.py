@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from importlib import resources
 from pathlib import Path
 from typing import Literal
@@ -24,7 +26,13 @@ app = FastAPI(
 
 
 def _index_html() -> str:
-    # Look for templates/index.html next to this file
+    # 1. Check PyInstaller _MEIPASS bundle directory (used in --onefile mode)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass_tpl = Path(sys._MEIPASS) / "apsearch" / "api" / "templates" / "index.html"
+        if meipass_tpl.is_file():
+            return meipass_tpl.read_text(encoding="utf-8")
+
+    # 2. Look for templates/index.html next to this file
     tpl = Path(__file__).resolve().parent / "templates" / "index.html"
     if tpl.is_file():
         return tpl.read_text(encoding="utf-8")
