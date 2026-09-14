@@ -38,6 +38,24 @@ def ensure_seed_db(db_path: Path) -> None:
     if db_path.is_file() and db_path.stat().st_size > 0:
         return
 
+    import gzip
+    import shutil
+
+    # Check for split multi-part archives (e.g. areios_pagos_seed.db.gz.part-aa, part-ab)
+    for search_dir in [
+        Path(__file__).resolve().parents[2] / "data",
+        Path.cwd() / "data",
+        Path.cwd(),
+    ]:
+        parts = sorted(search_dir.glob("areios_pagos_seed.db.gz.part-*"))
+        target_gz = search_dir / "areios_pagos_seed.db.gz"
+        if parts and not target_gz.is_file():
+            log.info("Joining %d seed parts into %s...", len(parts), target_gz)
+            with open(target_gz, "wb") as f_out:
+                for p in parts:
+                    with open(p, "rb") as f_in:
+                        shutil.copyfileobj(f_in, f_out)
+
     candidates = [
         Path(__file__).resolve().parents[2] / "data" / "areios_pagos_seed.db.gz",
         Path(__file__).resolve().parents[2] / "data" / "areios_pagos.db",
@@ -46,9 +64,6 @@ def ensure_seed_db(db_path: Path) -> None:
     ]
     for c in candidates:
         if c.is_file():
-            import gzip
-            import shutil
-
             log.info("Seeding initial database from %s -> %s", c, db_path)
             db_path.parent.mkdir(parents=True, exist_ok=True)
             if c.name.endswith(".gz"):

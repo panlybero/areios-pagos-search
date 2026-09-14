@@ -86,10 +86,11 @@ class _RateLimiter:
             return
         with self._lock:
             now = time.monotonic()
-            if now < self._next_at:
-                time.sleep(self._next_at - now)
-                now = time.monotonic()
-            self._next_at = now + self.min_interval
+            sleep_time = max(0.0, self._next_at - now)
+            base = max(now, self._next_at)
+            self._next_at = base + self.min_interval
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     def penalise(self, seconds: float) -> None:
         with self._lock:
@@ -176,7 +177,10 @@ class GeminiBackend:
             try:
                 delay = float(retry_after)
             except ValueError:
-                delay = 30.0
+                delay = 35.0
+        elif "429" in reason:
+            # Google's per-minute quota bucket needs 25-45s to refill
+            delay = min(75.0, 20.0 + 12.0 * attempt) * random.uniform(0.9, 1.2)
         else:
             delay = min(60.0, 2.0 * (2**attempt)) * random.uniform(0.8, 1.2)
         log.warning("gemini backoff %.1fs (attempt %d): %s", delay, attempt + 1, reason)
