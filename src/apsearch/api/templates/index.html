@@ -474,6 +474,11 @@
         const data = await res.json();
         const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 
+        if (!res.ok) {
+          showError(data.detail || data.error || `Σφάλμα HTTP ${res.status}`);
+          if (res.status === 400) checkApiKey(); // refresh the key banner too
+          return;
+        }
         if (data.error) {
           showError(data.error);
           return;

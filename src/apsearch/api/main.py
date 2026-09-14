@@ -200,18 +200,29 @@ async def search_endpoint(
 ) -> SearchResponse:
     from apsearch.search.hybrid import Filters, search
 
-    results = search(
-        q,
-        mode=mode,
-        limit=limit,
-        filters=Filters(
-            year_from=year_from,
-            year_to=year_to,
-            category=category,
-            chamber=chamber,
-            themes=list(theme or []),
-        ),
-    )
+    try:
+        results = search(
+            q,
+            mode=mode,
+            limit=limit,
+            filters=Filters(
+                year_from=year_from,
+                year_to=year_to,
+                category=category,
+                chamber=chamber,
+                themes=list(theme or []),
+            ),
+        )
+    except RuntimeError as exc:
+        if "Gemini API key" in str(exc):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Απαιτείται κλειδί Gemini API για σημασιολογική/υβριδική αναζήτηση. "
+                    "Πατήστε στο ⚙️ πάνω δεξιά για να το ρυθμίσετε, ή δοκιμάστε mode=keyword."
+                ),
+            ) from exc
+        raise
     return SearchResponse(
         query=q,
         mode=mode,
