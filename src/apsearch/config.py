@@ -159,8 +159,14 @@ class Settings(BaseSettings):
     #: Greek) or "fastembed" (local ONNX, fully open source, no API key).
     #: The rest of the stack -- Postgres, pgvector, FTS, fusion -- is open
     #: source either way, so this is a swappable component, not a lock-in.
-    embed_backend: str = "fastembed"
-    embed_dim: int = 384
+    #:
+    #: Defaults to "gemini"/768 because that is what the standalone packaged
+    #: app (PyInstaller build, no .env file, no bundled ONNX runtime) actually
+    #: ships and what the pre-seeded database's chunk_vec table was built
+    #: with. The Docker/Postgres deployment already overrides both of these
+    #: explicitly via its own .env, so this default change does not affect it.
+    embed_backend: str = "gemini"
+    embed_dim: int = 768
     embed_batch_size: int = 32
 
     # -- local ONNX backend --
