@@ -182,10 +182,10 @@ class Settings(BaseSettings):
         )
     )
     gemini_embed_model: str = "gemini-embedding-2"
-    gemini_concurrency: int = 4
+    gemini_concurrency: int = 2
     gemini_rpm: int = 0          # 0 = no client-side cap; raise if you hit 429s
     gemini_timeout: float = 120.0
-    gemini_max_retries: int = 5
+    gemini_max_retries: int = 8
 
     # ---------------------------------------------------------------- chunking
     chunk_target_chars: int = 1400

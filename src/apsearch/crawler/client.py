@@ -51,10 +51,12 @@ class RateLimiter:
     def wait(self) -> None:
         with self._lock:
             now = time.monotonic()
-            if now < self._next_at:
-                time.sleep(self._next_at - now)
-            # Jitter so we never look like a metronome.
-            self._next_at = time.monotonic() + self.min_interval * random.uniform(0.9, 1.3)
+            sleep_time = max(0.0, self._next_at - now)
+            base = max(now, self._next_at)
+            self._next_at = base + self.min_interval * random.uniform(0.9, 1.2)
+
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
     def penalise(self, seconds: float) -> None:
         """Push the next allowed request further out (after a server error)."""
@@ -163,13 +165,23 @@ class PoliteClient:
                 self._backoff(attempt, reason=repr(exc))
                 continue
 
+            if resp.status_code == 500:
+                # 500 on this legacy ASP site indicates a server-side script crash
+                # on a specific corrupt record. Retry once briefly, then fail fast
+                # so a single bad record never freezes the crawl queue.
+                if attempt >= 1:
+                    log.warning("HTTP 500 on %s (skipping bad record)", url)
+                    resp.raise_for_status()
+                time.sleep(1.5)
+                continue
+
             if resp.status_code in RETRY_STATUS:
                 last_exc = httpx.HTTPStatusError(
                     f"HTTP {resp.status_code} for {url}", request=resp.request, response=resp
                 )
                 self._backoff(
                     attempt,
-                    reason=f"HTTP {resp.status_code}",
+                    reason=f"HTTP {resp.status_code} on {url}",
                     retry_after=resp.headers.get("Retry-After"),
                 )
                 continue
@@ -189,13 +201,11 @@ class PoliteClient:
             try:
                 delay = float(retry_after)
             except ValueError:
-                delay = 60.0
+                delay = 30.0
         else:
-            # 5s, 15s, 45s, 135s -- back right off; the origin is not ours.
-            delay = 5.0 * (3**attempt) * random.uniform(0.8, 1.2)
+            delay = min(30.0, 2.0 * (2**attempt)) * random.uniform(0.8, 1.2)
         log.warning("backing off %.1fs (attempt %d/%d): %s",
                     delay, attempt + 1, settings.max_retries, reason)
-        # Also slow down every *other* caller, not just this one.
         self.limiter.penalise(delay)
         time.sleep(delay)
 
