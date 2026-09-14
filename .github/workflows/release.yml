@@ -1,4 +1,4 @@
-name: Release Desktop App
+name: Release macOS App
 
 on:
   push:
@@ -7,25 +7,16 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release tag name (e.g. v0.3.1)'
+        description: 'Release tag name (e.g. v0.3.0)'
         required: true
-        default: 'v0.3.1'
+        default: 'v0.3.0'
 
 permissions:
   contents: write
 
 jobs:
-  build-binaries:
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            artifact_name: AreiosPagos-macos-arm64.zip
-            binary_name: AreiosPagos
-          - os: windows-latest
-            artifact_name: AreiosPagos-windows-x64.zip
-            binary_name: AreiosPagos.exe
-    runs-on: ${{ matrix.os }}
+  build-macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -39,77 +30,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install .[api,mcp] pyinstaller sqlite-vec
 
-      - name: Build single standalone executable with PyInstaller
-        shell: bash
+      - name: Build standalone executable with PyInstaller
         run: |
-          sep=":"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            sep=";"
-          fi
           pyinstaller --name AreiosPagos --onefile --noconfirm \
-            --add-data "src/apsearch/api/templates/index.html${sep}apsearch/api/templates" \
+            --add-data "src/apsearch/api/templates/index.html:apsearch/api/templates" \
             --collect-all sqlite_vec \
             --collect-all uvicorn \
             src/apsearch/main_entry.py
 
       - name: Package single-executable release artifact
-        shell: bash
         run: |
           mkdir -p package
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp dist/AreiosPagos.exe package/
-            cp launch.bat package/ || true
-            powershell Compress-Archive -Path package/* -DestinationPath dist/${{ matrix.artifact_name }}
-          else
-            cp dist/AreiosPagos package/
-            chmod +x package/AreiosPagos
-            cp launch.command package/ || true
-            cp launch.sh package/ || true
-            cd package && zip -r ../dist/${{ matrix.artifact_name }} .
-          fi
+          cp dist/AreiosPagos package/
+          chmod +x package/AreiosPagos
+          cp launch.command package/
+          cd package && zip -r ../AreiosPagos-macos-arm64.zip .
 
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.artifact_name }}
-
-  publish-release:
-    needs: build-binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-assets
-
-      - name: Prepare assets for release
-        run: |
-          mkdir -p upload
-          find release-assets/ -type f -name "*.zip" -exec cp {} upload/ \;
-          ls -lh upload/
-
-      - name: Create or Update GitHub Release
+      - name: Upload to GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.inputs.tag_name || github.ref_name }}
         run: |
-          gh release upload "$TAG" upload/* --clobber || \
-          gh release create "$TAG" upload/* \
-            --title "Areios Pagos Search $TAG" \
-            --notes "### Άρειος Πάγος — Standalone Case Law Search & MCP Server ($TAG)
-
-          #### Available Packages:
-          * **macOS (Apple Silicon M1/M2/M3/M4)**: Download \`AreiosPagos-macos-arm64.zip\`, extract and run \`AreiosPagos\` (single executable).
-          * **Windows**: Download \`AreiosPagos-windows-x64.zip\`, extract and run \`AreiosPagos.exe\` (single executable).
-
-          #### Database Seed:
-          Download \`areios_pagos_seed.db.gz.part-aa\` and \`areios_pagos_seed.db.gz.part-ab\` attached to the release (the app launcher will also download them automatically on first start).
-
-          #### Features:
-          * Complete modern case law corpus (2018–2026, 26,324 rulings).
-          * Embedded SQLite engine with \`sqlite-vec\` vector embeddings and Greek FTS5 search.
-          * Local Web UI automatically opens in browser at http://localhost:8765.
-          * Connects directly to OpenWork, Claude Desktop, and Cursor via MCP at \`http://localhost:8766/mcp\`."
+          gh release upload "$TAG" AreiosPagos-macos-arm64.zip --clobber
