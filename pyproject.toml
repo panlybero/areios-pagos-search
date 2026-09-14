@@ -16,11 +16,14 @@ dependencies = [
     "python-dotenv>=1.0",
     "sqlite-vec>=0.1.9",
     "pgvector>=0.3.0",
-    # Stdlib sqlite3 on macOS/Windows official Python builds is compiled
-    # WITHOUT loadable-extension support (no `enable_load_extension`), which
-    # breaks sqlite-vec. pysqlite3-binary bundles its own SQLite with
-    # extensions enabled and is a drop-in replacement for dbapi2.
-    "pysqlite3-binary>=0.5.3",
+    # Stdlib sqlite3 on the official macOS/Windows Python builds (including
+    # the ones GitHub Actions runners use) is compiled WITHOUT
+    # loadable-extension support (no `enable_load_extension`), which breaks
+    # sqlite-vec. `sqlean.py` bundles its own recent SQLite with extension
+    # loading enabled, is dbapi2-API-compatible (drop-in for `import sqlite3`),
+    # and -- unlike pysqlite3-binary -- ships real wheels for macOS
+    # (including Apple Silicon arm64), not just Linux.
+    "sqlean.py>=3.47.0",
 ]
 
 [project.optional-dependencies]

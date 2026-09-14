@@ -31,20 +31,23 @@ log = get_logger(__name__)
 # not exist, which crashes `sqlite_vec.load()` with
 #   AttributeError: 'sqlite3.Connection' object has no attribute
 #   'enable_load_extension'
-# `pysqlite3-binary` ships its own statically-linked SQLite with extension
-# loading compiled in and is API-compatible with stdlib `sqlite3` (dbapi2), so
-# we prefer it whenever it's installed and silently fall back to stdlib
-# `sqlite3` for environments where extension loading already works (e.g. the
-# Linux system Python used in local dev/CI here).
+# `sqlean.py` bundles its own recent SQLite build with extension loading
+# compiled in and is dbapi2-API-compatible with stdlib `sqlite3` (verified:
+# enable_load_extension/load_extension, Row factory, FTS5, executemany all
+# behave identically). It ships real wheels for macOS -- including Apple
+# Silicon arm64 -- unlike `pysqlite3-binary`, which is Linux-only. We prefer
+# it whenever installed and silently fall back to stdlib `sqlite3` for
+# environments where extension loading already works (e.g. the Linux system
+# Python used in local dev/CI here).
 try:
-    import pysqlite3.dbapi2 as sqlite3  # type: ignore[import-not-found]
+    import sqlean as sqlite3  # type: ignore[import-not-found]
 except ImportError:
     import sqlite3  # type: ignore[no-redef]
 
 if not hasattr(sqlite3.Connection, "enable_load_extension"):
     raise ImportError(
         "No usable sqlite3 module found with loadable-extension support. "
-        "Install `pysqlite3-binary` (pip install pysqlite3-binary)."
+        "Install `sqlean.py` (pip install sqlean.py)."
     )
 
 
