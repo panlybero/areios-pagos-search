@@ -15,6 +15,7 @@ dependencies = [
     "tenacity>=8.3",
     "python-dotenv>=1.0",
     "sqlite-vec>=0.1.9",
+    "pgvector>=0.3.0",
 ]
 
 [project.optional-dependencies]

@@ -10,8 +10,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from pgvector import Vector
-from pgvector.psycopg import register_vector
+try:
+    from pgvector import Vector
+    from pgvector.psycopg import register_vector
+except ImportError:
+    Vector = None  # type: ignore
+    register_vector = None  # type: ignore
 
 from apsearch.config import settings
 from apsearch.db import create_vector_index, pool
