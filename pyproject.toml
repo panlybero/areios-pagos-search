@@ -16,6 +16,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "sqlite-vec>=0.1.9",
     "pgvector>=0.3.0",
+    # Stdlib sqlite3 on macOS/Windows official Python builds is compiled
+    # WITHOUT loadable-extension support (no `enable_load_extension`), which
+    # breaks sqlite-vec. pysqlite3-binary bundles its own SQLite with
+    # extensions enabled and is a drop-in replacement for dbapi2.
+    "pysqlite3-binary>=0.5.3",
 ]
 
 [project.optional-dependencies]

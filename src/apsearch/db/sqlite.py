@@ -12,7 +12,6 @@ Key differences from Postgres
 
 from __future__ import annotations
 
-import sqlite3
 import unicodedata
 from pathlib import Path
 
@@ -22,6 +21,31 @@ from apsearch.config import settings
 from apsearch.logging import get_logger
 
 log = get_logger(__name__)
+
+# ----------------------------------------------------------------------------
+# sqlite3 module selection
+# ----------------------------------------------------------------------------
+# The stdlib `sqlite3` module on the official macOS and Windows Python builds
+# (including the ones GitHub Actions / PyInstaller use) is compiled WITHOUT
+# loadable-extension support: `Connection.enable_load_extension` simply does
+# not exist, which crashes `sqlite_vec.load()` with
+#   AttributeError: 'sqlite3.Connection' object has no attribute
+#   'enable_load_extension'
+# `pysqlite3-binary` ships its own statically-linked SQLite with extension
+# loading compiled in and is API-compatible with stdlib `sqlite3` (dbapi2), so
+# we prefer it whenever it's installed and silently fall back to stdlib
+# `sqlite3` for environments where extension loading already works (e.g. the
+# Linux system Python used in local dev/CI here).
+try:
+    import pysqlite3.dbapi2 as sqlite3  # type: ignore[import-not-found]
+except ImportError:
+    import sqlite3  # type: ignore[no-redef]
+
+if not hasattr(sqlite3.Connection, "enable_load_extension"):
+    raise ImportError(
+        "No usable sqlite3 module found with loadable-extension support. "
+        "Install `pysqlite3-binary` (pip install pysqlite3-binary)."
+    )
 
 
 def fold_greek(s: str | None) -> str:
