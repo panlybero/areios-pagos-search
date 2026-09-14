@@ -26,7 +26,10 @@ import hashlib
 import random
 import unicodedata
 
-from pgvector import Vector
+try:
+    from pgvector import Vector
+except ImportError:
+    Vector = None  # type: ignore
 
 from apsearch.config import settings
 from apsearch.logging import get_logger

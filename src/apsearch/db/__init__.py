@@ -7,9 +7,13 @@ from importlib import resources
 from typing import Any
 
 import psycopg
-from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+
+try:
+    from pgvector.psycopg import register_vector
+except ImportError:
+    register_vector = None
 
 from apsearch.config import settings
 
@@ -35,7 +39,8 @@ def pool() -> ConnectionPool:
 def connect() -> psycopg.Connection:
     """A standalone connection (used for long-running maintenance statements)."""
     conn = psycopg.connect(settings.dsn, row_factory=dict_row, autocommit=True)
-    register_vector(conn)
+    if register_vector:
+        register_vector(conn)
     return conn
 
 
