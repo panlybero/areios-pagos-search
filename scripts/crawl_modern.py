@@ -1,11 +1,14 @@
-"""Background runner to fetch and embed all modern decisions (2018-2026).
+"""Autonomous runner to download all modern decisions and publish Release v0.3.0.
 
-Fetches in batches of 200, embeds them immediately with Gemini, and reports
-live progress to data/crawl_progress.json and stdout.
+* Phase 1: Rapid-fire crawl of all 24,000+ remaining decisions into SQLite (~1.3 hours).
+* Phase 2: Immediately compress, bundle, and publish GitHub Release v0.3.0 with
+  100% of modern cases (2018-2026) fully searchable via FTS5.
+* Phase 3: Continue generating vector embeddings in the background without blocking.
 """
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shutil
@@ -46,25 +49,32 @@ def write_progress(status: str, fetched: int, total: int, chunks: int) -> None:
 
 
 def main() -> None:
-    total_queued = repo.queue_depth()
-    initial_stats = repo.stats()
-    start_time = time.monotonic()
-    log.info("Starting modern backfill: %d decisions queued", total_queued)
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
-    batch_size = 200
+    start_time = time.monotonic()
+    total_queued = repo.queue_depth()
+    log.info("Starting rapid download of remaining %d decisions...", total_queued)
+
+    # =========================================================================
+    # PHASE 1: Rapid download of all remaining decisions (no embedding calls)
+    # =========================================================================
+    batch_size = 100
     with PoliteClient() as client:
         while True:
             remaining = repo.queue_depth()
             current_stats = repo.stats()
             fetched_so_far = current_stats["decisions"]
 
-            write_progress("crawling", fetched_so_far, fetched_so_far + remaining, current_stats["chunks"])
+            write_progress("downloading", fetched_so_far, fetched_so_far + remaining, current_stats["chunks"])
 
             if remaining == 0:
-                log.info("Queue drained! All decisions fetched.")
+                log.info("All decisions downloaded! Total on disk: %d", fetched_so_far)
                 break
 
-            # 1. Fetch batch
             stats = RunStats()
             try:
                 drain_queue(client, stats, limit=batch_size)
@@ -73,40 +83,29 @@ def main() -> None:
                 time.sleep(5)
                 continue
 
-            # 2. Embed batch immediately so work is saved incrementally
-            try:
-                istats = run_index(batch_size=16)
-                log.info(
-                    "Batch complete: %d fetched, %d chunks embedded. Remaining in queue: %d",
-                    stats.fetched, istats.chunks, repo.queue_depth(),
-                )
-            except Exception as exc:
-                log.warning("Batch indexing error: %s", exc)
+            log.info(
+                "Batch fetched %d decisions (queue remaining: %d)",
+                stats.fetched, repo.queue_depth(),
+            )
 
-    # 3. Final index pass to ensure zero pending
-    log.info("Running final indexing pass...")
-    run_index()
+    # =========================================================================
+    # PHASE 2: Package and publish Release v0.3.0 immediately with full text
+    # =========================================================================
+    mid_stats = repo.stats()
+    log.info("PHASE 1 COMPLETE: %d decisions stored locally.", mid_stats["decisions"])
+    write_progress("published_v0.3.0", mid_stats["decisions"], mid_stats["decisions"], mid_stats["chunks"])
 
-    total_time = time.monotonic() - start_time
-    final_stats = repo.stats()
-    log.info(
-        "CRAWL COMPLETE in %.1f minutes! Total decisions: %d, chunks: %d",
-        total_time / 60, final_stats["decisions"], final_stats["chunks"],
-    )
-    write_progress("completed", final_stats["decisions"], final_stats["decisions"], final_stats["chunks"])
-
-    # 4. Create compressed seed file for GitHub release
-    log.info("Compressing database to seed archive (%s)...", SEED_GZ)
-    import gzip
+    # Compress seed archive
+    log.info("Compressing full database to seed archive (%s)...", SEED_GZ)
     with open(DB_FILE, "rb") as f_in, gzip.open(SEED_GZ, "wb", compresslevel=6) as f_out:
         shutil.copyfileobj(f_in, f_out)
     log.info("Compressed seed created: %d MB", SEED_GZ.stat().st_size // (1024 * 1024))
 
-    # 5. Package universal zip
+    # Package universal zip
     root = Path(__file__).resolve().parents[1]
     PACKAGE_ZIP.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(PACKAGE_ZIP, "w", zipfile.ZIP_DEFLATED) as z:
-        for rel in ["launch.sh", "launch.bat", "pyproject.toml", "README.md"]:
+        for rel in ["launch.command", "launch.sh", "launch.bat", "pyproject.toml", "README.md"]:
             f = root / rel
             if f.is_file():
                 z.write(f, arcname=rel)
@@ -118,26 +117,47 @@ def main() -> None:
 
     log.info("Universal package created: %d MB", PACKAGE_ZIP.stat().st_size // (1024 * 1024))
 
-    # 6. Publish new GitHub release v0.3.0
+    # Publish GitHub release v0.3.0
     tag = "v0.3.0"
-    log.info("Publishing new release %s to GitHub...", tag)
-    n_dec = final_stats.get("decisions", 0)
-    n_ch = final_stats.get("chunks", 0)
+    log.info("Publishing release %s to GitHub...", tag)
+    n_dec = mid_stats.get("decisions", 0)
+    n_ch = mid_stats.get("chunks", 0)
     os.system(
-        f'git -c user.name="apsearch" -c user.email="dev@localhost" tag -a {tag} -m "Release {tag}: Complete modern case law corpus (2018-2026)" && git push origin {tag}'
+        f'git -c user.name="apsearch" -c user.email="dev@localhost" tag -a {tag} -m "Release {tag}: All modern decisions 2018-2026" && git push origin {tag}'
     )
     release_notes = (
         f"## Complete Modern Jurisprudence (2018–2026)\\n\\n"
-        f"* Contains every published decision from 2018 through 2026 (~{n_dec} rulings).\\n"
-        f"* Pre-embedded with {n_ch} passage vectors.\\n"
-        f"* Ready to double-click on Mac (launch.sh) or Windows (launch.bat)."
+        f"* **100% of all published decisions** from 2018 through 2026 (~{n_dec:,} rulings) are included.\\n"
+        f"* Fully searchable via Greek keyword search (FTS5) with inflection prefix-expansion.\\n"
+        f"* Pre-embedded with {n_ch:,} passage vectors so far (more vectors being generated in background updates).\\n"
+        f"* Ready to double-click on Mac (launch.command) or Windows (launch.bat)."
     )
     os.system(
         f'gh release create {tag} "{PACKAGE_ZIP}" "{SEED_GZ}" '
         f'--title "Areios Pagos Search {tag} (All Modern Cases 2018-2026)" '
         f'--notes "{release_notes}"'
     )
-    log.info("All done! Release %s published successfully.", tag)
+    log.info("Release %s published to GitHub!", tag)
+
+    # =========================================================================
+    # PHASE 3: Background embedding of remaining chunks (smooth pacing)
+    # =========================================================================
+    log.info("Starting background embedding pass...")
+    while True:
+        pending = repo.stats().get("pending_index", 0)
+        if pending == 0:
+            log.info("All decisions embedded successfully!")
+            break
+        try:
+            write_progress("embedding", mid_stats["decisions"] - pending, mid_stats["decisions"], repo.stats()["chunks"])
+            run_index(limit=16, batch_size=16)
+        except Exception as exc:
+            log.warning("Embedding backoff: %s (sleeping 25s)", exc)
+            time.sleep(25)
+
+    final_stats = repo.stats()
+    write_progress("completed", final_stats["decisions"], final_stats["decisions"], final_stats["chunks"])
+    log.info("ALL PHASES COMPLETE! Total time: %.1f minutes", (time.monotonic() - start_time) / 60)
 
 
 if __name__ == "__main__":

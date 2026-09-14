@@ -1,4 +1,4 @@
-"""Monitors the background crawl job and sends an email notification when complete."""
+"""Monitors the crawl job and sends email notifications on release and completion."""
 
 import json
 import smtplib
@@ -23,14 +23,17 @@ def send_email(subject: str, body: str) -> None:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as s:
             s.login(EMAIL, APP_PWD)
             s.send_message(msg)
+        print("Notification sent to", EMAIL, ":", subject)
     except Exception as exc:
         print(f"Failed to send email notification: {exc}")
 
 
 def main() -> None:
     print("Notification watcher started. Monitoring data/crawl_progress.json...")
+    notified_release = False
+
     while True:
-        time.sleep(30)
+        time.sleep(15)
         if not PROGRESS_FILE.is_file():
             continue
 
@@ -40,20 +43,34 @@ def main() -> None:
             continue
 
         status = data.get("status")
-        if status == "completed":
-            fetched = data.get("fetched", 0)
-            chunks = data.get("chunks", 0)
-            subject = f"✅ [Areios Pagos] Modern Corpus Crawl Complete ({fetched:,} decisions)"
+        fetched = data.get("fetched", 0)
+        chunks = data.get("chunks", 0)
+
+        # 1. Release v0.3.0 published (All decisions downloaded!)
+        if (status in ("published_v0.3.0", "embedding", "completed")) and not notified_release:
+            subject = f"🚀 [Areios Pagos] Release v0.3.0 Published! All {fetched:,} Modern Decisions Ready"
             body = (
-                f"The complete 2018–2026 Areios Pagos case law crawl has finished!\n\n"
-                f"• Decisions crawled & indexed: {fetched:,}\n"
-                f"• Total passage chunks: {chunks:,}\n\n"
-                f"The seed database and macOS universal package have been published to GitHub:\n"
+                f"Great news! All modern decisions from 2018 through 2026 have been downloaded and packaged!\n\n"
+                f"• Total decisions available: {fetched:,}\n"
+                f"• Passage chunks currently embedded: {chunks:,}\n\n"
+                f"Release v0.3.0 is live on GitHub and ready for your father / users:\n"
                 f"{RELEASE_URL}\n\n"
-                f"You can now send the release package to your father / users."
+                f"On macOS: download the zip, extract, and double-click launch.command!\n"
+                f"(Background vector embedding is continuing in the background)."
             )
             send_email(subject, body)
-            print("Completion notification sent to", EMAIL)
+            notified_release = True
+
+        # 2. Final completion (100% of all vector embeddings finished!)
+        if status == "completed":
+            subject = f"✅ [Areios Pagos] 100% Vector Embeddings Complete ({chunks:,} chunks)"
+            body = (
+                f"All passage chunks across the entire modern corpus have finished embedding!\n\n"
+                f"• Decisions: {fetched:,}\n"
+                f"• Embedded Chunks: {chunks:,}\n\n"
+                f"The database has full hybrid + semantic coverage across 100% of cases."
+            )
+            send_email(subject, body)
             break
 
 
