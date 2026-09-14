@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from apsearch import repo
+from apsearch.config import settings
 from apsearch.crawler.client import CrawlBudgetExceeded, PoliteClient
 from apsearch.crawler.discover import (
     FIRST_YEAR,
@@ -90,11 +92,13 @@ def drain_queue(
     stats: RunStats,
     limit: int | None = None,
     refs: dict[str, DecisionRef] | None = None,
-    batch: int = 200,
+    batch: int = 100,
 ) -> None:
     """Fetch queued decisions until the queue is empty or `limit` is reached."""
     refs = refs or {}
     processed = 0
+    workers = max(1, settings.crawl_concurrency)
+
     while True:
         take = batch if limit is None else min(batch, limit - processed)
         if take <= 0:
@@ -102,31 +106,46 @@ def drain_queue(
         rows = repo.take_queue(take)
         if not rows:
             return
-        for row in rows:
+
+        def _fetch_one(row):
             cd = row["cd"]
             try:
                 dec = fetch_decision(client, cd, row["number"], row["year"])
                 dec = merge_ref(dec, refs.get(cd))
                 if not dec.is_usable:
-                    raise ValueError(f"unusable body ({len(dec.body)} chars)")
-                outcome = repo.upsert_decision(dec)
+                    return cd, None, ValueError(f"unusable body ({len(dec.body)} chars)")
+                return cd, dec, None
             except CrawlBudgetExceeded:
-                stats.notes.append("request budget hit while fetching")
                 raise
-            except Exception as exc:  # noqa: BLE001
+            except Exception as err:  # noqa: BLE001
+                return cd, None, err
+
+        if workers <= 1:
+            results = [_fetch_one(r) for r in rows]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(_fetch_one, rows))
+
+        for cd, dec, exc in results:
+            if exc is not None:
                 log.warning("fetch failed for %s: %s", cd, exc)
                 repo.mark_queue_error(cd, str(exc))
                 stats.errors += 1
                 processed += 1
                 continue
 
+            outcome = repo.upsert_decision(dec)
             repo.dequeue(cd)
             stats.fetched += 1
-            setattr(stats, outcome, getattr(stats, outcome) + 1)  # new|changed|unchanged
+            setattr(stats, outcome, getattr(stats, outcome) + 1)
             processed += 1
 
-        log.info("fetched %d/%s (queue depth %d)", processed,
-                 limit if limit is not None else "all", repo.queue_depth())
+        log.info(
+            "fetched %d/%s (queue depth %d)",
+            processed,
+            limit if limit is not None else "all",
+            repo.queue_depth(),
+        )
 
 
 # ---------------------------------------------------------------------------

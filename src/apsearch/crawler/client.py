@@ -85,6 +85,7 @@ class PoliteClient:
                 "Accept-Language": "el,en;q=0.8",
             },
             timeout=settings.request_timeout,
+            limits=httpx.Limits(max_connections=12, max_keepalive_connections=10),
             follow_redirects=True,
         )
         self.n_requests = 0

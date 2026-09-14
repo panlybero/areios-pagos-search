@@ -135,9 +135,9 @@ class Settings(BaseSettings):
     #: silently blocking. Appended to the User-Agent when set.
     contact_email: str = ""
 
-    #: Seconds between consecutive requests. The origin is one IIS box run by a
-    #: public institution; 2s => 0.5 req/s is deliberately slow.
-    crawl_delay: float = 2.0
+    #: Seconds between consecutive requests (~0.22s => ~4.5 req/s).
+    crawl_delay: float = 0.22
+    crawl_concurrency: int = 3
     request_timeout: float = 90.0
     max_retries: int = 4
     #: Optional hard ceiling on requests per run, as a runaway-job safety net.
