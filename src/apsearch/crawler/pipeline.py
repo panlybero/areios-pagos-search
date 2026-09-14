@@ -129,7 +129,11 @@ def drain_queue(
         for cd, dec, exc in results:
             if exc is not None:
                 log.warning("fetch failed for %s: %s", cd, exc)
-                repo.mark_queue_error(cd, str(exc))
+                if "500" in str(exc) or "404" in str(exc):
+                    # Unrecoverable server error on the court's site: drop so it doesn't stall the queue
+                    repo.dequeue(cd)
+                else:
+                    repo.mark_queue_error(cd, str(exc))
                 stats.errors += 1
                 processed += 1
                 continue
