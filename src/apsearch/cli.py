@@ -334,8 +334,18 @@ def cli_launch(
     console.print(f"[bold green]Areios Pagos Search running at:[/bold green] http://{host}:{port}")
     console.print(f"[bold cyan]MCP server active at:[/bold cyan] http://localhost:{mcp_port}/mcp")
 
+    # Pass the ASGI app object directly rather than the "module:attr" string
+    # form. uvicorn's string form does its own importlib.import_module() at
+    # runtime, which PyInstaller's static analysis cannot see (there is no
+    # real `import` statement to trace) -- inside the frozen --onefile build
+    # that module is therefore never bundled, and this fails with
+    # "Could not import module 'apsearch.api.main'" the moment uvicorn tries
+    # to load it. Importing it here for real fixes both problems: PyInstaller
+    # bundles it correctly, and uvicorn skips the redundant re-import.
+    from apsearch.api.main import app as asgi_app
+
     uvicorn.run(
-        "apsearch.api.main:app",
+        asgi_app,
         host=host,
         port=port,
         log_config=None,
@@ -349,8 +359,10 @@ def cli_serve(
     """Run the REST API."""
     import uvicorn
 
+    from apsearch.api.main import app as asgi_app
+
     uvicorn.run(
-        "apsearch.api.main:app",
+        asgi_app,
         host=host or settings.host,
         port=port or settings.port,
         log_config=None,
