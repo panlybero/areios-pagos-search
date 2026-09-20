@@ -19,8 +19,8 @@ Two details that are easy to get wrong
    for both measurably degrades recall.
 2. **MRL truncation denormalises.** ``gemini-embedding-001`` natively produces
    3072 dims; asking for 768 truncates and the result is *not* unit-length
-   (observed norm ~0.59). Cosine distance in pgvector still works, but inner
-   product and any averaging do not. We renormalise unconditionally.
+   (observed norm ~0.59). Cosine distance still works, but inner product and
+   any averaging do not. We renormalise unconditionally.
 """
 
 from __future__ import annotations

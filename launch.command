@@ -10,8 +10,8 @@ echo "======================================================"
 if [ ! -f data/areios_pagos.db ] && [ ! -f data/areios_pagos_seed.db.gz ] && ! ls data/areios_pagos_seed.db.gz.part-* 1> /dev/null 2>&1; then
     echo "Λήψη προ-επεξεργασμένης βάσης δεδομένων (όλες οι αποφάσεις 2018-2026)..."
     mkdir -p data
-    curl -L --progress-bar -o data/areios_pagos_seed.db.gz.part-aa "https://github.com/panlybero/areios-pagos-search/releases/download/v0.3.0/areios_pagos_seed.db.gz.part-aa"
-    curl -L --progress-bar -o data/areios_pagos_seed.db.gz.part-ab "https://github.com/panlybero/areios-pagos-search/releases/download/v0.3.0/areios_pagos_seed.db.gz.part-ab"
+    curl -L --progress-bar -o data/areios_pagos_seed.db.gz.part-aa "https://github.com/panlybero/areios-pagos-search/releases/download/v0.4.0/areios_pagos_seed.db.gz.part-aa"
+    curl -L --progress-bar -o data/areios_pagos_seed.db.gz.part-ab "https://github.com/panlybero/areios-pagos-search/releases/download/v0.4.0/areios_pagos_seed.db.gz.part-ab"
 fi
 
 # 2. Join split database parts if present

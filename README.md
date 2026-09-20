@@ -4,9 +4,10 @@ Hybrid keyword + semantic search over the published case law of the **Άρειο
 Πάγος** (Supreme Court of Greece), 1994–present, with an MCP server so agents
 can query it directly.
 
-Everything in the retrieval stack is open source (Postgres + pgvector + Greek
-full-text search). The embedding model is pluggable: a hosted one for speed, or
-a fully local ONNX model if you want zero external dependencies.
+Everything runs off a single SQLite file — no server, no daemon, no ports.
+`sqlite-vec` provides vector search, SQLite's FTS5 the Greek lexical index. The
+embedding model is pluggable: a hosted one for speed, or a fully local ONNX
+model if you want zero external dependencies.
 
 ## Why it is built this way
 
@@ -23,8 +24,8 @@ its properties dictated the design:
 - **Pages are windows-1253**, frequently without a charset header, and the HTML
   is unbalanced. Parsing is regex-based on raw markup rather than DOM-based,
   because DOM repair differs between pages.
-- **Postgres' Greek stemmer is unreliable** for legal Greek, and its stopword
-  list is empty. Both are worked around in `search/query.py` — see below.
+- **SQLite has no Greek stemmer**, and its default stopword list is empty. Both
+  are worked around in `search/query.py` — see below.
 
 ## Architecture
 
@@ -32,14 +33,14 @@ its properties dictated the design:
 areiospagos.gr
       │  polite crawler (0.5 req/s, archived responses)
       ▼
-  raw HTML archive ──► parsers ──► Postgres
+  raw HTML archive ──► parsers ──► SQLite (single file)
                                     ├── decision   (text, headnote, subjects)
                                     ├── chunk      (passages + embeddings)
                                     └── theme      (court's own vocabulary)
                                           │
                     ┌─────────────────────┼─────────────────────┐
                     ▼                     ▼                     ▼
-              chunk lexical FTS     doc-level FTS          pgvector
+               chunk FTS5          doc-level FTS5          sqlite-vec
                     └──────────── RRF fusion ─────────────────┘
                                     │
                         CLI  ·  REST API  ·  MCP server
@@ -53,29 +54,24 @@ Three retrievers are fused with Reciprocal Rank Fusion:
 | --------- | ------- |
 | `chunk_lexical` | citations, statute numbers, exact terms of art |
 | `doc_lexical`   | relevance spread thinly across a long decision |
-| `semantic`      | paraphrase, and the morphology the stemmer drops |
+| `semantic`      | paraphrase, and the morphology a naive tokenizer drops |
 
-RRF is used instead of score interpolation because `ts_rank_cd` is unbounded
-while cosine is `[-1,1]`; RRF needs no per-corpus tuning to stay stable.
+RRF is used instead of score interpolation because `bm25`/rank scores are
+unbounded while cosine distance is `[0,2]`; RRF needs no per-corpus tuning to
+stay stable.
 
 ### The two Greek-language problems
 
-**1. Unstable stemming.** Postgres stems the same lemma inconsistently:
+**1. Inflection variants.** Greek legal prose normally uses the genitive
+(`λόγος αναιρέσεως`, `αγωγή αδικοπραξίας`), so a nominative query silently
+misses genitive documents. Since the unstable part is always a suffix, queries
+are expanded to prefix matches (`αδικοπραξ*`) after accent-folding, which
+unifies the variants.
 
-```
-αδικοπραξία → αδικοπραξ      αδικοπραξίας → αδικοπραξι
-αναίρεση    → αναιρεσ        αναιρεσείων  → αναιρεσει
-```
-
-A nominative query silently misses genitive documents — and the genitive is the
-*normal* form in Greek legal prose (`λόγος αναιρέσεως`, `αγωγή αδικοπραξίας`).
-Since the unstable part is always a suffix, queries are expanded to prefix
-lexemes (`αδικοπραξ:*`), which unifies the variants.
-
-**2. No stopword list.** `to_tsvector('greek', 'του την και στο')` yields
-`τ, την, κα, στ` — present in 100% of documents. These are filtered at query
-time, on **surface forms, before stemming**, because after stemming the
-information needed to do it safely is gone:
+**2. No stopword list.** The default tokenizer keeps `τ, την, κα, στ` — present
+in 100% of documents. These are filtered at query time, on **surface forms,
+before stemming**, because after stemming the information needed to do it safely
+is gone:
 
 ```
 από (preposition) → απ    |    ΑΠ (Άρειος Πάγος)       → απ
@@ -85,9 +81,6 @@ information needed to do it safely is gone:
 Filtering the stem `απ` would delete the court's own name from queries. Short
 all-caps tokens are therefore always treated as legal abbreviations, keeping
 `ΑΚ`, `ΠΚ`, `ΚΠολΔ`, `ΚΠΔ`, `ΝΔ`, `ΕΣΔΑ` searchable.
-
-Stopwords are filtered from queries only, not from the index: managed Postgres
-(Cloud SQL) gives no filesystem access to install a stopword file.
 
 ## Crawling policy
 
@@ -110,8 +103,6 @@ resumable — interrupt it freely. The daily poll costs ~10 requests.
 ## Quick start
 
 ```bash
-docker compose up -d                 # Postgres 17 + pgvector
-cp .env.example .env                 # add APSEARCH_GEMINI_API_KEY
 pip install -e ".[api,mcp]"
 
 apsearch db migrate
@@ -121,17 +112,22 @@ apsearch index build
 apsearch search "παραγραφή αξιώσεων κατά του Δημοσίου"
 ```
 
+On first run the app auto-downloads a pre-seeded database (all decisions
+2018–2026) from the GitHub releases if `data/areios_pagos.db` is missing, so a
+backfill is only needed for years before 2018.
+
 ### Commands
 
 ```
-apsearch db migrate|stats
+apsearch db migrate|stats|cache-stats|prune-cache
 apsearch crawl backfill|poll|fetch|themes
-apsearch index build|reset|vector-index
+apsearch index build|reset
 apsearch search <query> [--mode hybrid|keyword|semantic] [--year-from ...]
 apsearch get 144/2015 [--body]
 apsearch themes [prefix]
-apsearch serve                       # REST API
-apsearch mcp [--transport stdio|http]
+apsearch launch                       # Web UI + MCP server + auto-sync
+apsearch serve                        # REST API
+apsearch mcp [--transport stdio|http|sse]
 ```
 
 ## MCP server
@@ -143,7 +139,7 @@ apsearch mcp [--transport stdio|http]
     "areios-pagos": {
       "command": "apsearch",
       "args": ["mcp"],
-      "env": { "APSEARCH_PG_PORT": "5433", "APSEARCH_GEMINI_API_KEY": "..." }
+      "env": { "APSEARCH_GEMINI_API_KEY": "..." }
     }
   }
 }
@@ -162,7 +158,7 @@ tool-design rationale.
 
 ## Embedding backends
 
-| | `gemini` (default in `.env.example`) | `fastembed` (fully open source) |
+| | `gemini` (default) | `fastembed` (fully open source) |
 | --- | --- | --- |
 | Model | `gemini-embedding-2`, 768 dim | `multilingual-e5-small`, 384 dim |
 | Context | 8192 tokens | 512 tokens |
@@ -191,27 +187,22 @@ Chunking splits on the decisions' rhetorical skeleton — `ΣΚΕΦΘΗΚΕ ΣΥ
 legal points. The headnote becomes its own chunk, since it is an editorial
 abstract of exactly what the decision holds.
 
+The lexical index uses **contentless** FTS5 tables: the index stores only the
+accent-folded tokens, never a second copy of the full text (~3.5 GB of
+duplication eliminated). The original text always lives in `decision`/`chunk`,
+which search joins back to via rowid.
+
 ## Tests
 
 ```bash
-pytest            # 70 tests; 60 need neither network nor database
+pytest            # unit tests; no network, no external database
 ```
-
-Integration tests auto-skip when no Postgres is reachable
-(`docker compose up -d && apsearch db migrate` to enable them).
 
 Parser tests run against saved fixtures. Note `test_no_runaway_duplication`:
 the chunker once emitted 757 overlapping spans for one decision (2.1x text
 coverage, some spans one character long) because the packing cursor could stall
 and creep forward one character at a time. That is a 7x embedding-cost bug that
 is invisible without an explicit invariant, so it has a named regression test.
-
-## Deployment
-
-Not deployed. See [`docs/deploy-gcp.md`](docs/deploy-gcp.md) for the intended
-Cloud Run + Cloud SQL shape; the config layer already supports Cloud SQL unix
-sockets, GCS-backed response archiving, structured Cloud Logging output, and
-`PORT`.
 
 ## Legal note
 

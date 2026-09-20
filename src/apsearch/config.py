@@ -1,9 +1,7 @@
 """Central configuration.
 
-Strictly 12-factor: every value is overridable from the environment, so the
-same image runs unchanged on a laptop, a VM, or Cloud Run. Nothing here reaches
-for a GCP SDK -- the cloud-specific bits are isolated behind
-``APSEARCH_CACHE_BACKEND`` and the Cloud SQL socket handling below.
+Every value is overridable from the environment (``APSEARCH_*``), so the same
+code runs unchanged on a laptop, a VM, or a CI runner.
 """
 
 from __future__ import annotations
@@ -11,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from urllib.parse import quote
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -74,9 +71,8 @@ class Settings(BaseSettings):
     log_json: bool | None = None
 
     # ---------------------------------------------------------------- database
-    #: "sqlite" (default standalone portable single-file engine, zero setup)
-    #: or "postgres" (server/cloud with pgvector)
-    db_backend: str = "sqlite"
+    #: Single-file SQLite database. sqlite-vec provides vector search, FTS5 the
+    #: lexical index: no daemon, no ports, no separate setup.
     sqlite_path: str = "data/areios_pagos.db"
 
     @property
@@ -94,37 +90,6 @@ class Settings(BaseSettings):
         user_dir = Path.home() / ".apsearch"
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir / p.name
-
-    pg_host: str = "localhost"
-    pg_port: int = 5433
-    pg_user: str = "apsearch"
-    pg_password: str = "apsearch"
-    pg_database: str = "apsearch"
-    pg_sslmode: str = ""
-    #: Cloud SQL instance connection name, e.g. "proj:europe-west3:apsearch".
-    #: When set, connect over the /cloudsql unix socket that Cloud Run mounts,
-    #: which needs no proxy sidecar and no IP allow-listing.
-    cloudsql_instance: str = ""
-    #: Escape hatch: a fully-formed DSN wins over everything above.
-    database_url: str = ""
-
-    @property
-    def dsn(self) -> str:
-        if self.database_url:
-            return self.database_url
-        user = quote(self.pg_user, safe="")
-        pwd = quote(self.pg_password, safe="")
-        if self.cloudsql_instance:
-            socket_dir = os.environ.get("CLOUD_SQL_SOCKET_DIR", "/cloudsql")
-            host = quote(f"{socket_dir}/{self.cloudsql_instance}", safe="")
-            return f"postgresql://{user}:{pwd}@/{self.pg_database}?host={host}"
-        dsn = f"postgresql://{user}:{pwd}@{self.pg_host}:{self.pg_port}/{self.pg_database}"
-        if self.pg_sslmode:
-            dsn += f"?sslmode={self.pg_sslmode}"
-        return dsn
-
-    pool_min_size: int = 1
-    pool_max_size: int = 8
 
     # ----------------------------------------------------------------- crawler
     base_url: str = "https://www.areiospagos.gr"
@@ -157,14 +122,12 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------- embedding
     #: Which backend produces vectors: "gemini" (hosted, fast, best quality on
     #: Greek) or "fastembed" (local ONNX, fully open source, no API key).
-    #: The rest of the stack -- Postgres, pgvector, FTS, fusion -- is open
+    #: The rest of the stack -- SQLite, sqlite-vec, FTS5, fusion -- is open
     #: source either way, so this is a swappable component, not a lock-in.
     #:
     #: Defaults to "gemini"/768 because that is what the standalone packaged
     #: app (PyInstaller build, no .env file, no bundled ONNX runtime) actually
-    #: ships and what the pre-seeded database's chunk_vec table was built
-    #: with. The Docker/Postgres deployment already overrides both of these
-    #: explicitly via its own .env, so this default change does not affect it.
+    #: ships and what the pre-seeded database's chunk_vec table was built with.
     embed_backend: str = "gemini"
     embed_dim: int = 768
     embed_batch_size: int = 32
@@ -204,7 +167,7 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------ query cache
     query_cache_enabled: bool = True
-    #: Max number of cached query vectors to retain in Postgres.
+    #: Max number of cached query vectors to retain.
     #: 20,000 queries ≈ 65 MB. An LRU prune runs whenever this cap is reached.
     query_cache_max_entries: int = 20000
     #: Auto-expire cached queries not accessed within this many days.

@@ -1,7 +1,8 @@
 """Query construction for Greek legal text.
 
-Two defects in Postgres' built-in Greek support have to be worked around, and
-both are corpus-correctness issues rather than tuning preferences.
+Two defects in the Greek morphological handling of full-text engines have to be
+worked around, and both are corpus-correctness issues rather than tuning
+preferences.
 
 1. Unstable stemming across inflections
 ---------------------------------------
@@ -11,17 +12,16 @@ both are corpus-correctness issues rather than tuning preferences.
 A nominative query therefore misses genitive documents -- and the genitive is
 the *normal* form in Greek legal prose ("λόγος αναιρέσεως", "αγωγή
 αδικοπραξίας"). Since the unstable part is always a suffix, the shorter stem is
-a prefix of the longer one, so emitting prefix lexemes (`αδικοπραξ:*`) unifies
-them. Only for stems of >= MIN_PREFIX_LEN characters: `δικ:*` would match
+a prefix of the longer one, so emitting prefix matches (`αδικοπραξ*`) unifies
+them. Only for stems of >= MIN_PREFIX_LEN characters: `δικ*` would match
 δικαστήριο / δικαίωμα / δίκη and is worse than useless.
 
 2. No effective stopword list
 -----------------------------
-``to_tsvector('greek', 'του την και στο')`` yields ``τ, την, κα, στ`` -- these
-appear in 100% of documents, bloat the index and distort ts_rank_cd.
-
-Filtering them is done on **surface forms, before stemming**, because after
-stemming the information needed to do it safely is already gone:
+The engine's default tokenizer yields `τ, την, κα, στ` for "του την και στο" --
+these appear in 100% of documents and bloat the index. Filtering is done on
+**surface forms, before stemming**, because after stemming the information
+needed to do it safely is already gone:
 
     από (preposition)          -> απ  |  ΑΠ  (Άρειος Πάγος)        -> απ
     αν  (conjunction "if")     -> αν  |  ΑΝ  (Αναγκαστικός Νόμος)  -> αν
@@ -29,11 +29,6 @@ stemming the information needed to do it safely is already gone:
 Dropping the stem ``απ`` would silently delete "Άρειος Πάγος" from queries. So
 an all-caps short token is always treated as an acronym and never as a
 stopword. This also keeps ΑΚ, ΠΚ, ΚΠολΔ, ΚΠΔ, ΝΔ, ΕΣΔΑ searchable.
-
-Stopwords are *not* stripped from the index, only from queries: a managed
-Postgres (Cloud SQL) gives no filesystem access to install a stopword file, so
-the index-side fix is unavailable by design. Query-side filtering achieves the
-same retrieval behaviour at the cost of some index size.
 """
 
 from __future__ import annotations
@@ -44,7 +39,7 @@ import unicodedata
 #: Below this, a prefix match is too broad to be useful.
 MIN_PREFIX_LEN = 5
 
-#: Greek vowels. The snowball stemmer's instability is a single trailing vowel
+#: Greek vowels. The stemmer's instability is a single trailing vowel
 #: (αδικοπραξ / αδικοπραξι), so trimming one -- when the stem stays long enough
 #: to remain selective -- makes the prefix match symmetric in both directions.
 _VOWELS = "αεηιουω"
@@ -70,11 +65,10 @@ STOPWORDS: frozenset[str] = frozenset(
 #: (ΑΚ, ΑΠ, ΠΚ, ΝΔ, ΚΠΔ, ΚΠολΔ, ΕΣΔΑ) and never filtered as a stopword.
 MAX_ACRONYM_LEN = 6
 
-#: Signals that the user wants websearch semantics (phrases, OR, negation).
+#: Signals that the user wants exact-phrase/operator semantics (quotes, OR, etc).
 _SYNTAX_RE = re.compile(r'["\u201c\u201d]|(?<!\w)-\w|\bOR\b|\bAND\b')
 
 _TOKEN_RE = re.compile(r"[\w\u0370-\u03ff\u1f00-\u1fff]+", re.UNICODE)
-_TSQUERY_UNSAFE = re.compile(r"[^\w\u0370-\u03ff\u1f00-\u1fff]", re.UNICODE)
 
 
 def fold(s: str) -> str:
@@ -112,16 +106,6 @@ def content_tokens(query: str) -> list[str]:
     return out
 
 
-def lexemes_for(cur, text: str, config: str = "el_stem") -> list[str]:
-    """Stem text with the same configuration used to build the index."""
-    cur.execute(
-        "SELECT tsvector_to_array(to_tsvector(%s::regconfig, %s)) AS lex",
-        (config, text),
-    )
-    row = cur.fetchone()
-    return list(row["lex"] or []) if row else []
-
-
 def trim_unstable_suffix(stem: str) -> str:
     """Drop one trailing vowel so both stem variants share the prefix.
 
@@ -132,53 +116,3 @@ def trim_unstable_suffix(stem: str) -> str:
     if len(stem) > MIN_PREFIX_LEN and stem[-1] in _VOWELS:
         return stem[:-1]
     return stem
-
-
-def build_prefix_tsquery(lexemes: list[str], conjunctive: bool = True) -> str:
-    parts: list[str] = []
-    for lex in lexemes:
-        clean = _TSQUERY_UNSAFE.sub("", lex)
-        if not clean:
-            continue
-        if len(clean) >= MIN_PREFIX_LEN:
-            parts.append(f"{trim_unstable_suffix(clean)}:*")
-        else:
-            parts.append(clean)
-    if not parts:
-        return ""
-    return (" & " if conjunctive else " | ").join(dict.fromkeys(parts))
-
-
-def prepare(
-    cur, query: str, expand: bool = True, conjunctive: bool = True
-) -> tuple[str, dict]:
-    """Build the SQL expression + params that produce a tsquery.
-
-    Returns ``(sql_expression, params)``; the expression references only the
-    returned parameter names, so it is safe to interpolate into a query string.
-    """
-    query = (query or "").strip()
-    if not query:
-        return "to_tsquery('el_stem', '')", {}
-
-    # Explicit syntax means the user asked for precision; don't second-guess.
-    if not expand or has_operators(query):
-        return "websearch_to_tsquery('el_stem', %(qtext)s)", {"qtext": query}
-
-    tokens = content_tokens(query)
-    if not tokens:
-        return "websearch_to_tsquery('el_stem', %(qtext)s)", {"qtext": query}
-
-    expr = build_prefix_tsquery(lexemes_for(cur, " ".join(tokens)), conjunctive)
-    if not expr:
-        return "websearch_to_tsquery('el_stem', %(qtext)s)", {"qtext": query}
-    return "%(qexpr)s::tsquery", {"qexpr": expr}
-
-
-def is_expanded(params: dict) -> bool:
-    """True when `prepare` produced an expanded tsquery (not a websearch one).
-
-    Only expanded queries may be safely retried disjunctively: if the user
-    supplied explicit operators we must honour them exactly.
-    """
-    return "qexpr" in params

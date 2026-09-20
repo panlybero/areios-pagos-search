@@ -24,9 +24,6 @@ Claude Desktop — `claude_desktop_config.json`:
       "command": "/abs/path/to/.venv/bin/apsearch",
       "args": ["mcp"],
       "env": {
-        "APSEARCH_PG_HOST": "localhost",
-        "APSEARCH_PG_PORT": "5433",
-        "APSEARCH_PG_PASSWORD": "apsearch",
         "APSEARCH_EMBED_BACKEND": "gemini",
         "APSEARCH_EMBED_DIM": "768",
         "APSEARCH_GEMINI_API_KEY": "..."
@@ -43,8 +40,7 @@ OpenCode — `opencode.json`:
   "mcp": {
     "areios-pagos": {
       "type": "local",
-      "command": ["/abs/path/to/.venv/bin/apsearch", "mcp"],
-      "environment": { "APSEARCH_PG_PORT": "5433" }
+      "command": ["/abs/path/to/.venv/bin/apsearch", "mcp"]
     }
   }
 }

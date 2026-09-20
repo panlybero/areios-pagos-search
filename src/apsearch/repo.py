@@ -1,17 +1,13 @@
-"""Persistence layer: all SQL that writes lives here."""
+"""Persistence layer: all SQL that writes lives here (SQLite backend)."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
-from psycopg.rows import dict_row
-
-from apsearch import repo_sqlite
-from apsearch.config import settings
 from apsearch.crawler.discover import CATEGORIES, CHAMBERS
 from apsearch.crawler.fetch import content_hash, decision_url
-from apsearch.crawler.parse import Decision, DecisionRef, Theme, fold_greek
-from apsearch.db import pool
+from apsearch.crawler.parse import Decision, DecisionRef, Theme
+from apsearch.db.sqlite import connect, fold_greek, fts_delete
 from apsearch.logging import get_logger
 
 log = get_logger(__name__)
@@ -34,66 +30,60 @@ def chamber_id(label: str | None) -> int | None:
 
 
 def upsert_themes(themes: Iterable[Theme]) -> int:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.upsert_themes(themes)
     rows = [(t.code, t.label, t.slug) for t in themes]
     if not rows:
         return 0
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.executemany(
+    with connect() as conn:
+        conn.executemany(
             """
-            INSERT INTO theme (code, label, slug) VALUES (%s, %s, %s)
+            INSERT INTO theme (code, label, slug) VALUES (?, ?, ?)
             ON CONFLICT (code) DO UPDATE
-              SET label = EXCLUDED.label, slug = EXCLUDED.slug
+              SET label = excluded.label, slug = excluded.slug
             """,
             rows,
         )
+        conn.commit()
     return len(rows)
 
 
 def link_theme(code: int, cds: Iterable[str]) -> int:
-    """Attach a subject heading to decisions we already hold."""
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.link_theme(code, cds)
     cds = list(cds)
     if not cds:
         return 0
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO decision_theme (cd, theme_code)
-            SELECT d.cd, %s FROM decision d WHERE d.cd = ANY(%s)
-            ON CONFLICT DO NOTHING
+    with connect() as conn:
+        placeholders = ",".join("?" * len(cds))
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO decision_theme (cd, theme_code)
+            SELECT cd, ? FROM decision WHERE cd IN ({placeholders})
             """,
-            (code, cds),
+            [code, *cds],
         )
-        n = cur.rowcount
-        cur.execute(
+        cur = conn.execute(
             """
             UPDATE theme
-               SET n_decisions = (SELECT count(*) FROM decision_theme WHERE theme_code = %s),
-                   crawled_at = now()
-             WHERE code = %s
+               SET n_decisions = (SELECT count(*) FROM decision_theme WHERE theme_code = ?),
+                   crawled_at = datetime('now')
+             WHERE code = ?
             """,
             (code, code),
         )
-    return n
+        conn.commit()
+        return cur.rowcount
 
 
 def themes_needing_crawl(max_age_days: int = 30) -> list[dict]:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.themes_needing_crawl(max_age_days)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             """
             SELECT code, label FROM theme
              WHERE crawled_at IS NULL
-                OR crawled_at < now() - make_interval(days => %s)
-             ORDER BY crawled_at NULLS FIRST, code
+                OR datetime(crawled_at) < datetime('now', '-' || ? || ' days')
+             ORDER BY crawled_at IS NOT NULL, code
             """,
             (max_age_days,),
         )
-        return cur.fetchall()
+        return [dict(r) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------
@@ -102,86 +92,71 @@ def themes_needing_crawl(max_age_days: int = 30) -> list[dict]:
 
 
 def known_cds(cds: Iterable[str]) -> set[str]:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.known_cds(cds)
     cds = list(cds)
     if not cds:
         return set()
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT cd FROM decision WHERE cd = ANY(%s)", (cds,))
+    with connect() as conn:
+        placeholders = ",".join("?" * len(cds))
+        cur = conn.execute(f"SELECT cd FROM decision WHERE cd IN ({placeholders})", cds)
         return {r["cd"] for r in cur.fetchall()}
 
 
 def enqueue(refs: Iterable[DecisionRef]) -> int:
-    """Queue newly discovered decisions whose text we do not have yet."""
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.enqueue(refs)
     refs = list(refs)
     if not refs:
         return 0
-    rows = [
-        (r.cd, r.number, r.year, r.category, r.chamber)
-        for r in refs
-    ]
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.executemany(
+    rows = [(r.cd, r.number, r.year, r.category, r.chamber) for r in refs]
+    with connect() as conn:
+        conn.executemany(
             """
-            INSERT INTO fetch_queue (cd, number, year, category, chamber)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (cd) DO NOTHING
+            INSERT OR IGNORE INTO fetch_queue (cd, number, year, category, chamber)
+            VALUES (?, ?, ?, ?, ?)
             """,
             rows,
         )
-        # Anything already stored does not need fetching again.
-        cur.execute(
-            "DELETE FROM fetch_queue q USING decision d WHERE d.cd = q.cd"
-        )
+        # Delete anything already stored
+        conn.execute("DELETE FROM fetch_queue WHERE cd IN (SELECT cd FROM decision)")
+        conn.commit()
     return len(rows)
 
 
 def take_queue(limit: int) -> list[dict]:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.take_queue(limit)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             """
             SELECT cd, number, year, category, chamber, attempts
               FROM fetch_queue
              WHERE attempts < 5
-             ORDER BY year DESC NULLS LAST, number DESC NULLS LAST
-             LIMIT %s
+             ORDER BY year DESC, number DESC
+             LIMIT ?
             """,
             (limit,),
         )
-        return cur.fetchall()
+        return [dict(r) for r in cur.fetchall()]
 
 
 def dequeue(cd: str) -> None:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.dequeue(cd)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM fetch_queue WHERE cd = %s", (cd,))
+    with connect() as conn:
+        conn.execute("DELETE FROM fetch_queue WHERE cd = ?", (cd,))
+        conn.commit()
 
 
 def mark_queue_error(cd: str, error: str) -> None:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.mark_queue_error(cd, error)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        conn.execute(
             """
             UPDATE fetch_queue
-               SET attempts = attempts + 1, last_error = %s
-             WHERE cd = %s
+               SET attempts = attempts + 1, last_error = ?
+             WHERE cd = ?
             """,
-            (error[:2000], cd),
+            (str(error)[:2000], cd),
         )
+        conn.commit()
 
 
 def queue_depth() -> int:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.queue_depth()
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) AS n FROM fetch_queue WHERE attempts < 5")
+    with connect() as conn:
+        cur = conn.execute("SELECT count(*) AS n FROM fetch_queue WHERE attempts < 5")
         return cur.fetchone()["n"]
 
 
@@ -191,88 +166,99 @@ def queue_depth() -> int:
 
 
 def upsert_decision(dec: Decision) -> str:
-    """Insert or update a decision. Returns 'new' | 'changed' | 'unchanged'."""
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.upsert_decision(dec)
     chash = content_hash(dec.body)
     url = decision_url(dec.cd, dec.number, dec.year)
-    with pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            INSERT INTO decision (
-                cd, number, year, category_id, chamber_id, category, chamber,
-                subject, summary, body, source_url, content_hash, last_changed
-            ) VALUES (
-                %(cd)s, %(number)s, %(year)s, %(category_id)s, %(chamber_id)s,
-                %(category)s, %(chamber)s, %(subject)s, %(summary)s, %(body)s,
-                %(source_url)s, %(content_hash)s, now()
-            )
-            ON CONFLICT (cd) DO UPDATE SET
-                number       = EXCLUDED.number,
-                year         = EXCLUDED.year,
-                category_id  = EXCLUDED.category_id,
-                chamber_id   = EXCLUDED.chamber_id,
-                category     = EXCLUDED.category,
-                chamber      = EXCLUDED.chamber,
-                subject      = EXCLUDED.subject,
-                summary      = EXCLUDED.summary,
-                body         = EXCLUDED.body,
-                source_url   = EXCLUDED.source_url,
-                content_hash = EXCLUDED.content_hash,
-                last_fetched = now(),
-                last_changed = CASE
-                    WHEN decision.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-                    THEN now() ELSE decision.last_changed END
-            RETURNING (xmax = 0) AS inserted,
-                      (content_hash = %(content_hash)s) AS same_hash
-            """,
-            {
-                "cd": dec.cd,
-                "number": dec.number,
-                "year": dec.year,
-                "category_id": category_id(dec.category),
-                "chamber_id": chamber_id(dec.chamber),
-                "category": dec.category,
-                "chamber": dec.chamber,
-                "subject": dec.subject,
-                "summary": dec.summary,
-                "body": dec.body,
-                "source_url": url,
-                "content_hash": chash,
-            },
+    with connect() as conn:
+        cur = conn.execute(
+            "SELECT content_hash, subject, summary, body FROM decision WHERE cd = ?",
+            (dec.cd,),
         )
-        row = cur.fetchone()
+        existing = cur.fetchone()
 
-        # Subject headings parsed off the decision page itself; match them to
-        # the controlled vocabulary by folded label.
-        if dec.subjects:
-            cur.execute(
+        if existing is None:
+            outcome = "new"
+            conn.execute(
                 """
-                INSERT INTO decision_theme (cd, theme_code)
-                SELECT %s, t.code FROM theme t
-                 WHERE lower(translate(t.label,
-                        'άέήίόύώϊϋΐΰςΆΈΉΊΌΎΏ',
-                        'αεηιουωιυιυσαεηιουω')) = ANY(%s)
-                ON CONFLICT DO NOTHING
+                INSERT INTO decision (
+                    cd, number, year, category_id, chamber_id, category, chamber,
+                    subject, summary, body, body_chars, source_url, content_hash,
+                    first_seen, last_fetched, last_changed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'))
                 """,
-                (dec.cd, [fold_greek(s) for s in dec.subjects]),
+                (
+                    dec.cd, dec.number, dec.year, category_id(dec.category),
+                    chamber_id(dec.chamber), dec.category, dec.chamber,
+                    dec.subject, dec.summary, dec.body, len(dec.body),
+                    url, chash,
+                ),
+            )
+        else:
+            outcome = "unchanged" if existing["content_hash"] == chash else "changed"
+            conn.execute(
+                """
+                UPDATE decision SET
+                    number = ?, year = ?, category_id = ?, chamber_id = ?,
+                    category = ?, chamber = ?, subject = ?, summary = ?,
+                    body = ?, body_chars = ?, source_url = ?, content_hash = ?,
+                    last_fetched = datetime('now'),
+                    last_changed = CASE WHEN content_hash != ? THEN datetime('now') ELSE last_changed END
+                WHERE cd = ?
+                """,
+                (
+                    dec.number, dec.year, category_id(dec.category),
+                    chamber_id(dec.chamber), dec.category, dec.chamber,
+                    dec.subject, dec.summary, dec.body, len(dec.body),
+                    url, chash, chash, dec.cd,
+                ),
             )
 
-    if row["inserted"]:
-        return "new"
-    return "unchanged" if row["same_hash"] else "changed"
+        rowid = conn.execute("SELECT rowid FROM decision WHERE cd = ?", (dec.cd,)).fetchone()["rowid"]
+
+        # Rebuild this decision's lexical index row. Contentless FTS5 tables
+        # cannot UPDATE, so an existing row must be deleted (with its original
+        # values) before the fresh one is inserted.
+        if existing is not None:
+            fts_delete(
+                conn,
+                "decision_fts",
+                rowid,
+                [
+                    fold_greek(existing["subject"]),
+                    fold_greek(existing["summary"]),
+                    fold_greek(existing["body"]),
+                ],
+            )
+        conn.execute(
+            """
+            INSERT INTO decision_fts (rowid, subject_folded, summary_folded, body_folded)
+            VALUES (?, ?, ?, ?)
+            """,
+            (rowid, fold_greek(dec.subject), fold_greek(dec.summary), fold_greek(dec.body)),
+        )
+
+        # Attach subjects to controlled vocabulary
+        if dec.subjects:
+            for s in dec.subjects:
+                fs = fold_greek(s)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO decision_theme (cd, theme_code)
+                    SELECT ?, code FROM theme WHERE lower(label) = ?
+                    """,
+                    (dec.cd, fs),
+                )
+        conn.commit()
+    return outcome
 
 
 def decision_count() -> int:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.decision_count()
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) AS n FROM decision")
+    with connect() as conn:
+        cur = conn.execute("SELECT count(*) AS n FROM decision")
         return cur.fetchone()["n"]
 
 
 # ---------------------------------------------------------------------------
-# Crawl bookkeeping
+# Crawl Bookkeeping
 # ---------------------------------------------------------------------------
 
 
@@ -280,33 +266,28 @@ def record_partition(
     year: int, category_id_: int, chamber_id_: int, n_found: int, truncated: bool,
     status: str = "done", error: str | None = None,
 ) -> None:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.record_partition(
-            year, category_id_, chamber_id_, n_found, truncated, status, error
-        )
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        conn.execute(
             """
             INSERT INTO crawl_partition
                 (year, category_id, chamber_id, status, n_found, truncated, error, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT (year, category_id, chamber_id) DO UPDATE SET
-                status = EXCLUDED.status, n_found = EXCLUDED.n_found,
-                truncated = EXCLUDED.truncated, error = EXCLUDED.error,
-                updated_at = now()
+                status = excluded.status, n_found = excluded.n_found,
+                truncated = excluded.truncated, error = excluded.error,
+                updated_at = datetime('now')
             """,
-            (year, category_id_, chamber_id_, status, n_found, truncated, error),
+            (year, category_id_, chamber_id_, status, n_found, 1 if truncated else 0, error),
         )
+        conn.commit()
 
 
 def year_is_done(year: int) -> bool:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.year_is_done(year)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             """
             SELECT status FROM crawl_partition
-             WHERE year = %s AND category_id = 6 AND chamber_id = 1
+             WHERE year = ? AND category_id = 6 AND chamber_id = 1
             """,
             (year,),
         )
@@ -315,23 +296,20 @@ def year_is_done(year: int) -> bool:
 
 
 def start_run(kind: str) -> int:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.start_run(kind)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO crawl_run (kind) VALUES (%s) RETURNING id", (kind,))
-        return cur.fetchone()["id"]
+    with connect() as conn:
+        cur = conn.execute("INSERT INTO crawl_run (kind) VALUES (?)", (kind,))
+        conn.commit()
+        return cur.lastrowid
 
 
 def finish_run(run_id: int, **counts) -> None:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.finish_run(run_id, **counts)
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        conn.execute(
             """
-            UPDATE crawl_run SET finished_at = now(),
-                   n_discovered = %s, n_fetched = %s, n_changed = %s,
-                   n_errors = %s, notes = %s
-             WHERE id = %s
+            UPDATE crawl_run SET finished_at = datetime('now'),
+                   n_discovered = ?, n_fetched = ?, n_changed = ?,
+                   n_errors = ?, notes = ?
+             WHERE id = ?
             """,
             (
                 counts.get("n_discovered", 0),
@@ -342,26 +320,24 @@ def finish_run(run_id: int, **counts) -> None:
                 run_id,
             ),
         )
+        conn.commit()
 
 
 def stats() -> dict:
-    if settings.db_backend == "sqlite":
-        return repo_sqlite.stats()
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             """
             SELECT
-              (SELECT count(*) FROM decision)                              AS decisions,
-              (SELECT count(*) FROM decision WHERE summary IS NOT NULL)    AS with_summary,
-              (SELECT count(*) FROM chunk)                                 AS chunks,
-              (SELECT count(*) FROM chunk WHERE embedding IS NOT NULL)     AS embedded,
-              (SELECT count(*) FROM theme)                                 AS themes,
-              (SELECT count(*) FROM decision_theme)                        AS theme_links,
-              (SELECT count(*) FROM fetch_queue WHERE attempts < 5)        AS queued,
-              (SELECT min(year) FROM decision)                             AS first_year,
-              (SELECT max(year) FROM decision)                             AS last_year,
-              (SELECT count(*) FROM decision
-                WHERE indexed_hash IS DISTINCT FROM content_hash)          AS pending_index
+              (SELECT count(*) FROM decision) AS decisions,
+              (SELECT count(*) FROM decision WHERE summary IS NOT NULL AND length(summary) > 0) AS with_summary,
+              (SELECT count(*) FROM chunk) AS chunks,
+              (SELECT count(*) FROM chunk_vec) AS embedded,
+              (SELECT count(*) FROM theme) AS themes,
+              (SELECT count(*) FROM decision_theme) AS theme_links,
+              (SELECT count(*) FROM fetch_queue WHERE attempts < 5) AS queued,
+              (SELECT min(year) FROM decision) AS first_year,
+              (SELECT max(year) FROM decision) AS last_year,
+              (SELECT count(*) FROM decision WHERE indexed_hash IS NOT content_hash) AS pending_index
             """
         )
-        return cur.fetchone()
+        return dict(cur.fetchone())

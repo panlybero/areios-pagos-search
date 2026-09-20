@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-from pgvector import Vector
+import sqlite3
 
+import pytest
+
+from apsearch.db.sqlite import connect, init_sqlite_db
 from apsearch.search.cache import (
     cache_key,
     cache_stats,
@@ -42,82 +44,54 @@ class TestQueryNormalization:
         assert k1 != k2
 
 
-def _db_available() -> bool:
-    try:
-        import psycopg
-
-        from apsearch.config import settings
-
-        with psycopg.connect(settings.dsn, connect_timeout=2):
-            return True
-    except Exception:
-        return False
+@pytest.fixture
+def cache_db() -> sqlite3.Connection:
+    conn = connect(":memory:", auto_seed=False)
+    init_sqlite_db(conn)
+    yield conn
+    conn.close()
 
 
-needs_db = pytest.mark.skipif(not _db_available(), reason="no database reachable")
-
-
-@pytest.mark.integration
-@needs_db
 class TestQueryCacheDB:
-    def test_cache_hit_and_access_counter(self):
-        from apsearch.db import pool
-
+    def test_cache_hit_and_access_counter(self, cache_db: sqlite3.Connection):
         sig = "test:model:768"
         query = "δοκιμή query cache"
-        dummy_vec = Vector([0.1] * 768)
+        dummy_vec = [0.1] * 768
 
-        with pool().connection() as conn, conn.cursor() as cur:
-            # Clean test slate
-            cur.execute("DELETE FROM query_cache WHERE model_sig = %s", (sig,))
+        # 1. Miss initially
+        assert get_cached_vector(cache_db, query, sig) is None
 
-            # 1. Miss initially
-            assert get_cached_vector(cur, query, sig) is None
+        # 2. Store vector
+        store_cached_vector(cache_db, query, sig, dummy_vec)
 
-            # 2. Store vector
-            store_cached_vector(cur, query, sig, dummy_vec)
+        # 3. Hit
+        hit = get_cached_vector(cache_db, query, sig)
+        assert hit is not None
+        assert len(hit) == 768
 
-            # 3. Hit
-            hit = get_cached_vector(cur, query, sig)
-            assert hit is not None
-            assert len(hit.to_list()) == 768
+        # 4. Access count increments
+        cur = cache_db.execute(
+            "SELECT access_count FROM query_cache WHERE query_hash = ?",
+            (cache_key(query, sig),),
+        )
+        assert cur.fetchone()["access_count"] == 2
 
-            # 4. Access count increments
-            cur.execute(
-                "SELECT access_count FROM query_cache WHERE query_hash = %s",
-                (cache_key(query, sig),),
-            )
-            assert cur.fetchone()["access_count"] == 2
-
-            # Clean up
-            cur.execute("DELETE FROM query_cache WHERE model_sig = %s", (sig,))
-
-    def test_lru_pruning_removes_oldest_first(self):
-        from apsearch.db import pool
-
+    def test_lru_pruning_removes_oldest_first(self, cache_db: sqlite3.Connection):
         sig = "test:lru:768"
-        dummy_vec = Vector([0.05] * 768)
+        dummy_vec = [0.05] * 768
 
-        with pool().connection() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM query_cache WHERE model_sig = %s", (sig,))
+        for i in range(5):
+            store_cached_vector(cache_db, f"query {i}", sig, dummy_vec)
 
-            # Insert 5 queries
-            for i in range(5):
-                store_cached_vector(cur, f"query {i}", sig, dummy_vec)
+        deleted = prune_query_cache(cache_db, max_entries=2, ttl_days=365)
+        assert deleted >= 3
 
-            # Prune with cap of 2
-            deleted = prune_query_cache(cur, max_entries=2, ttl_days=365)
-            assert deleted >= 3
+        cur = cache_db.execute("SELECT count(*) AS n FROM query_cache")
+        assert cur.fetchone()["n"] == 2
 
-            # Exactly 2 remain
-            cur.execute("SELECT count(*) AS n FROM query_cache")
-            assert cur.fetchone()["n"] == 2
-
-            stats = cache_stats(cur)
-            assert stats["total_entries"] == 2
-            assert stats["table_size"]
-
-            cur.execute("DELETE FROM query_cache WHERE model_sig = %s", (sig,))
+        stats = cache_stats(cache_db)
+        assert stats["total_entries"] == 2
+        assert stats["table_size"]
 
     def test_query_length_guard_fails_loudly(self):
         from apsearch.search.hybrid import search

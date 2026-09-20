@@ -1,7 +1,7 @@
 """Greek query-construction tests.
 
-These encode the two Postgres defects the query builder exists to work around,
-so that a future "simplification" cannot silently undo them.
+These encode the Greek inflection and stopword defects the query builder exists
+to work around, so that a future "simplification" cannot silently undo them.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import pytest
 
 from apsearch.search.query import (
     STOPWORDS,
-    build_prefix_tsquery,
     content_tokens,
     fold,
     has_operators,
@@ -66,22 +65,6 @@ class TestPrefixExpansion:
         # Truncating these would match far too much.
         assert trim_unstable_suffix("δικα") == "δικα"
         assert trim_unstable_suffix("αρθρ") == "αρθρ"
-
-    def test_short_lexemes_stay_exact(self):
-        q = build_prefix_tsquery(["ακ", "αδικοπραξ"])
-        assert "ακ &" in q or "ακ " in q
-        assert "ακ:*" not in q
-        assert "αδικοπραξ:*" in q
-
-    def test_conjunctive_and_disjunctive(self):
-        assert build_prefix_tsquery(["αναιρεσ", "αποφασ"], True) == "αναιρεσ:* & αποφασ:*"
-        assert build_prefix_tsquery(["αναιρεσ", "αποφασ"], False) == "αναιρεσ:* | αποφασ:*"
-
-    def test_duplicates_collapsed(self):
-        assert build_prefix_tsquery(["αναιρεσ", "αναιρεσ"]) == "αναιρεσ:*"
-
-    def test_empty(self):
-        assert build_prefix_tsquery([]) == ""
 
 
 class TestOperatorDetection:

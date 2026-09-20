@@ -1,7 +1,5 @@
 """SQLite + sqlite-vec database backend for zero-setup standalone deployments.
 
-Key differences from Postgres
------------------------------
 * Stored in a single file on disk (default: `data/areios_pagos.db`).
 * Zero daemon, zero ports, zero installation. Runs in-process inside the app.
 * `sqlite-vec` provides C-level vector similarity search (`vec0` virtual table).
@@ -62,10 +60,49 @@ def fold_greek(s: str | None) -> str:
     return unicodedata.normalize("NFC", s).lower().replace("ς", "σ")
 
 
+#: Indexed column names per contentless FTS5 table, in declaration order.
+FTS_COLUMNS: dict[str, list[str]] = {
+    "chunk_fts": ["content_folded"],
+    "decision_fts": ["subject_folded", "summary_folded", "body_folded"],
+}
+
+
+def _is_contentless_fts(conn: sqlite3.Connection, table: str) -> bool:
+    """True when an FTS5 table was created with ``content=''``."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = ? AND type = 'table'", (table,)
+    ).fetchone()
+    if not row:
+        return False
+    sql = (row["sql"] or "").replace(" ", "")
+    return "content=''" in sql or 'content=""' in sql
+
+
+def fts_delete(conn: sqlite3.Connection, table: str, rowid: int, values: list[str]) -> None:
+    """Remove a row from an FTS5 table.
+
+    Contentless tables (``content=''``) reject ``UPDATE`` and ``DELETE``; the
+    supported idiom is the special ``'delete'`` command expressed as an INSERT,
+    and it must be given the original indexed values because a contentless
+    table does not retain them. Regular (non-contentless) tables support a
+    plain ``DELETE ... WHERE rowid`` instead.
+    """
+    if _is_contentless_fts(conn, table):
+        cols = FTS_COLUMNS[table]
+        placeholders = ", ".join("?" * len(cols))
+        conn.execute(
+            f"INSERT INTO {table}({table}, rowid, {', '.join(cols)}) "
+            f"VALUES('delete', ?, {placeholders})",
+            [rowid, *values],
+        )
+    else:
+        conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (rowid,))
+
+
 #: Where the pre-built corpus lives. Bumping this requires a matching release
 #: with these two exact asset names (GitHub caps a single release asset at 2GB,
 #: hence the split).
-SEED_RELEASE_TAG = "v0.3.0"
+SEED_RELEASE_TAG = "v0.4.0"
 SEED_RELEASE_BASE = (
     f"https://github.com/panlybero/areios-pagos-search/releases/download/{SEED_RELEASE_TAG}"
 )
@@ -396,15 +433,17 @@ def init_sqlite_db(conn: sqlite3.Connection | None = None) -> None:
     try:
         conn.executescript(SCHEMA_SQL)
 
-        # FTS5 tables for keyword search
+        # FTS5 tables for keyword search. Both are contentless (content="")
+        # so the index stores only the folded tokens, not a second copy of the
+        # full text (~3.5 GB of duplication eliminated). The original text
+        # always lives in `decision` / `chunk`, which search joins back to via
+        # rowid. Contentless tables cannot be UPDATEd or DELETE'd normally --
+        # use `fts_delete` below, which issues the FTS5 special 'delete' command.
         conn.execute(
             """
             CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
                 content_folded,
-                content UNINDEXED,
-                cd UNINDEXED,
-                part UNINDEXED,
-                tokenize = "unicode61"
+                content=''
             )
             """
         )
@@ -415,8 +454,7 @@ def init_sqlite_db(conn: sqlite3.Connection | None = None) -> None:
                 subject_folded,
                 summary_folded,
                 body_folded,
-                cd UNINDEXED,
-                tokenize = "unicode61"
+                content=''
             )
             """
         )

@@ -5,7 +5,7 @@ Default is ``intfloat/multilingual-e5-small`` served through fastembed/ONNX:
 * genuinely trained for a 512-token window -- this matters, because the popular
   ``paraphrase-multilingual-MiniLM-L12-v2`` truncates at 128 tokens, which
   silently discards most of a ~1400-character Greek legal chunk;
-* 384 dimensions keeps the pgvector index small and HNSW build times sane;
+* 384 dimensions keeps the vector index small and similarity lookups fast;
 * ONNX on CPU means no torch dependency and no GPU requirement.
 
 Measured on a 4-vCPU box with no AVX-512: ~3.8 chunks/s fp32, ~4.9 int8. On a

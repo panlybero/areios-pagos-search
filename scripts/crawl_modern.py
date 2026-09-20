@@ -17,9 +17,6 @@ import time
 import zipfile
 from pathlib import Path
 
-# Ensure SQLite backend is used
-os.environ["APSEARCH_DB_BACKEND"] = "sqlite"
-
 from apsearch import repo
 from apsearch.crawler.client import PoliteClient
 from apsearch.crawler.pipeline import RunStats, drain_queue

@@ -30,13 +30,11 @@ def _root() -> None:
 
 # ---------------------------------------------------------------------- db
 @db_app.command("migrate")
-def db_migrate(
-    vector_index: bool = typer.Option(False, help="Also build the HNSW index now"),
-) -> None:
+def db_migrate() -> None:
     """Create or update the schema."""
     from apsearch.db import migrate
 
-    migrate(with_vector_index=vector_index)
+    migrate()
     console.print("[green]schema up to date[/green]")
 
 
@@ -55,11 +53,11 @@ def db_stats() -> None:
 @db_app.command("cache-stats")
 def db_cache_stats() -> None:
     """Show query embedding cache statistics."""
-    from apsearch.db import pool
+    from apsearch.db.sqlite import connect
     from apsearch.search.cache import cache_stats
 
-    with pool().connection() as conn, conn.cursor() as cur:
-        s = cache_stats(cur)
+    with connect() as conn:
+        s = cache_stats(conn)
     t = Table(show_header=False, box=None)
     for k, v in s.items():
         t.add_row(f"[cyan]{k}[/cyan]", f"{v:,}" if isinstance(v, int) else str(v))
@@ -72,11 +70,11 @@ def db_prune_cache(
     ttl_days: int = typer.Option(None, help="Purge queries older than N days"),
 ) -> None:
     """Evict expired and LRU queries from the cache to reclaim disk space."""
-    from apsearch.db import pool
+    from apsearch.db.sqlite import connect
     from apsearch.search.cache import prune_query_cache
 
-    with pool().connection() as conn, conn.cursor() as cur:
-        deleted = prune_query_cache(cur, max_entries=max_entries, ttl_days=ttl_days)
+    with connect() as conn:
+        deleted = prune_query_cache(conn, max_entries=max_entries, ttl_days=ttl_days)
     console.print(f"[green]pruned[/green] {deleted:,} cached queries")
 
 
@@ -154,12 +152,11 @@ def _print_run(s) -> None:
 def index_build(
     limit: int = typer.Option(None, help="Index at most N decisions"),
     batch_size: int = typer.Option(16, help="Decisions per embedding batch"),
-    skip_vector_index: bool = typer.Option(False, help="Don't build HNSW afterwards"),
 ) -> None:
     """Chunk + embed decisions that are new or changed."""
     from apsearch.index.build import run_index
 
-    s = run_index(limit, batch_size, build_index_after=not skip_vector_index)
+    s = run_index(limit, batch_size)
     console.print(
         f"[green]indexed[/green] {s.decisions:,} decisions / {s.chunks:,} chunks "
         f"in {s.seconds:.0f}s ({s.rate:.1f} chunks/s)"
@@ -177,15 +174,6 @@ def index_reset(
         raise typer.Abort()
     reset_index()
     console.print("[yellow]index reset[/yellow]")
-
-
-@index_app.command("vector-index")
-def index_vector() -> None:
-    """Build the HNSW index (slow; do it once after a bulk load)."""
-    from apsearch.db import create_vector_index
-
-    create_vector_index()
-    console.print("[green]HNSW index built[/green]")
 
 
 # ------------------------------------------------------------------ search

@@ -1,40 +1,41 @@
-"""Hybrid retrieval over the decision corpus.
+"""Hybrid retrieval over the decision corpus (SQLite FTS5 + sqlite-vec).
 
 Three independent retrievers, fused with Reciprocal Rank Fusion:
 
-``chunk_lexical``   Postgres FTS over passages. Wins on citations, statute
-                    numbers and exact legal terms of art.
-``doc_lexical``     Weighted FTS over the whole decision (subject^A,
-                    headnote^B, body^C). Catches documents whose relevance is
-                    spread thinly rather than concentrated in one passage.
-``semantic``        pgvector cosine over passage embeddings. Carries the
-                    morphological load that the Greek snowball stemmer drops
-                    (it stems "αδικοπραξία" and "αδικοπραξίας" differently),
-                    and handles paraphrase.
+``chunk_lexical``   FTS5 over passages. Wins on citations, statute numbers and
+                    exact legal terms of art.
+``doc_lexical``     FTS5 over the whole decision (subject/summary/body).
+                    Catches documents whose relevance is spread thinly rather
+                    than concentrated in one passage.
+``semantic``        sqlite-vec cosine over passage embeddings. Carries the
+                    morphological load that the stemmer drops (it treats
+                    "αδικοπραξία" and "αδικοπραξίας" differently), and handles
+                    paraphrase.
 
 RRF is used rather than score interpolation because the three scores live on
-incomparable scales (ts_rank_cd is unbounded, cosine is [-1,1]) and RRF needs
-no per-corpus tuning to stay stable.
+incomparable scales (FTS5 rank is unbounded, cosine distance is [0,2]) and RRF
+needs no per-corpus tuning to stay stable.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
-try:
-    from pgvector import Vector
-    from pgvector.psycopg import register_vector
-except ImportError:
-    Vector = None  # type: ignore
-    register_vector = None  # type: ignore
+import sqlite_vec
 
 from apsearch.config import settings
-from apsearch.db import pool
+from apsearch.db.sqlite import connect, fold_greek
 from apsearch.index.embed import get_backend
 from apsearch.logging import get_logger
 from apsearch.search import cache
-from apsearch.search import query as qbuild
+from apsearch.search.query import (
+    MIN_PREFIX_LEN,
+    content_tokens,
+    has_operators,
+    trim_unstable_suffix,
+)
 
 log = get_logger(__name__)
 
@@ -53,34 +54,6 @@ class Filters:
     chamber: str | None = None
     themes: list[str] = field(default_factory=list)
     cds: list[str] = field(default_factory=list)
-
-    def where(self) -> tuple[str, dict]:
-        clauses: list[str] = []
-        params: dict = {}
-        if self.year_from is not None:
-            clauses.append("d.year >= %(year_from)s")
-            params["year_from"] = self.year_from
-        if self.year_to is not None:
-            clauses.append("d.year <= %(year_to)s")
-            params["year_to"] = self.year_to
-        if self.category:
-            clauses.append("d.category ILIKE %(category)s")
-            params["category"] = f"%{self.category}%"
-        if self.chamber:
-            clauses.append("d.chamber = %(chamber)s")
-            params["chamber"] = self.chamber
-        if self.cds:
-            clauses.append("d.cd = ANY(%(cds)s)")
-            params["cds"] = self.cds
-        if self.themes:
-            clauses.append(
-                """EXISTS (
-                    SELECT 1 FROM decision_theme dt JOIN theme t ON t.code = dt.theme_code
-                     WHERE dt.cd = d.cd AND t.label ILIKE ANY(%(themes)s)
-                )"""
-            )
-            params["themes"] = [f"%{t}%" for t in self.themes]
-        return (" AND ".join(clauses) if clauses else "TRUE"), params
 
 
 @dataclass(slots=True)
@@ -138,83 +111,6 @@ class Result:
 
 
 # ---------------------------------------------------------------------------
-# Retrievers
-# ---------------------------------------------------------------------------
-
-
-def _chunk_lexical(cur, qexpr: str, qparams: dict, where: str,
-                   params: dict, pool_size: int):
-    cur.execute(
-        f"""
-        SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part,
-               ts_rank_cd(c.tsv_stem, q, 32) AS score
-          FROM chunk c
-          JOIN decision d ON d.cd = c.cd,
-               LATERAL (SELECT {qexpr} AS q) tq
-         WHERE {where} AND c.tsv_stem @@ tq.q
-         ORDER BY score DESC, c.id
-         LIMIT %(pool)s
-        """,
-        {**params, **qparams, "pool": pool_size},
-    )
-    return cur.fetchall()
-
-
-def _doc_lexical(cur, qexpr: str, qparams: dict, where: str,
-                 params: dict, pool_size: int):
-    cur.execute(
-        f"""
-        SELECT d.cd, ts_rank_cd(d.tsv_stem, tq.q, 32) AS score
-          FROM decision d, LATERAL (SELECT {qexpr} AS q) tq
-         WHERE {where} AND d.tsv_stem @@ tq.q
-         ORDER BY score DESC, d.cd
-         LIMIT %(pool)s
-        """,
-        {**params, **qparams, "pool": pool_size},
-    )
-    return cur.fetchall()
-
-
-def _check_vector_dim(cur, qvec) -> None:
-    query_dim = qvec.dimensions() if hasattr(qvec, "dimensions") else len(qvec)
-    cur.execute(
-        """
-        SELECT atttypmod AS dim
-          FROM pg_attribute
-         WHERE attrelid = 'chunk'::regclass AND attname = 'embedding'
-        """
-    )
-    row = cur.fetchone()
-    stored_dim = row["dim"] if row else -1
-    if stored_dim > 0 and stored_dim != query_dim:
-        cur.execute("SELECT value FROM index_meta WHERE key = 'embedding'")
-        meta = cur.fetchone()
-        meta_val = meta["value"] if meta else "unknown"
-        raise ValueError(
-            f"Embedding dimension mismatch: query vector has {query_dim} dims, "
-            f"but database index has {stored_dim} dims (indexed as '{meta_val}'). "
-            f"Set APSEARCH_EMBED_BACKEND and APSEARCH_EMBED_DIM to match."
-        )
-
-
-def _semantic(cur, qvec, where: str, params: dict, pool_size: int):
-    _check_vector_dim(cur, qvec)
-    cur.execute(
-        f"""
-        SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part,
-               1 - (c.embedding <=> %(qv)s) AS score
-          FROM chunk c
-          JOIN decision d ON d.cd = c.cd
-         WHERE {where} AND c.embedding IS NOT NULL
-         ORDER BY c.embedding <=> %(qv)s
-         LIMIT %(pool)s
-        """,
-        {**params, "qv": qvec, "pool": pool_size},
-    )
-    return cur.fetchall()
-
-
-# ---------------------------------------------------------------------------
 # Fusion
 # ---------------------------------------------------------------------------
 
@@ -242,14 +138,91 @@ def rrf(
     return out
 
 
-def _dedupe_keep_order(rows, key="cd") -> list[str]:
-    seen: set[str] = set()
-    order: list[str] = []
-    for r in rows:
-        if r[key] not in seen:
-            seen.add(r[key])
-            order.append(r[key])
-    return order
+# ---------------------------------------------------------------------------
+# FTS5 query construction & highlighting
+# ---------------------------------------------------------------------------
+
+
+def build_fts5_query(query: str, conjunctive: bool = True) -> str:
+    """Turn a Greek query into SQLite FTS5 syntax."""
+    query = (query or "").strip()
+    if not query:
+        return ""
+
+    if has_operators(query):
+        # Escape quotes or clean operators for FTS5
+        clean = query.replace('"', '""')
+        return f'"{clean}"'
+
+    tokens = content_tokens(query)
+    if not tokens:
+        tokens = [t for t in query.split() if t]
+
+    parts: list[str] = []
+    for tok in tokens:
+        clean = re.sub(r"[^\w\u0370-\u03ff\u1f00-\u1fff]", "", tok, flags=re.UNICODE)
+        if not clean:
+            continue
+        folded = fold_greek(clean)
+        if len(folded) >= MIN_PREFIX_LEN:
+            trimmed = trim_unstable_suffix(folded)
+            parts.append(f'"{trimmed}"*')
+        else:
+            parts.append(f'"{folded}"')
+
+    if not parts:
+        return ""
+    sep = " AND " if conjunctive else " OR "
+    return sep.join(dict.fromkeys(parts))
+
+
+def highlight_greek(text: str, query: str, max_chars: int = 350) -> str:
+    """Highlight query stems in original Greek text and extract a relevant window."""
+    if not text:
+        return ""
+    tokens = content_tokens(query)
+    if not tokens:
+        tokens = [t for t in query.split() if len(t) >= 3]
+
+    stems = []
+    for t in tokens:
+        f = fold_greek(re.sub(r"[^\w]", "", t))
+        if len(f) >= 4:
+            stems.append(trim_unstable_suffix(f))
+        elif f:
+            stems.append(f)
+
+    if not stems:
+        return text[:max_chars].replace("\n", " ").strip()
+
+    # Find the earliest match position to center the snippet
+    folded_text = fold_greek(text)
+    first_pos = len(text)
+    for stem in stems:
+        idx = folded_text.find(stem)
+        if 0 <= idx < first_pos:
+            first_pos = idx
+
+    # Compute excerpt window
+    start = max(0, first_pos - 60)
+    end = min(len(text), start + max_chars)
+    # Align to word boundary
+    if start > 0:
+        sp = text.find(" ", start)
+        if 0 < sp < start + 30:
+            start = sp + 1
+    snippet = text[start:end].replace("\n", " ").strip()
+    if start > 0:
+        snippet = "… " + snippet
+    if end < len(text):
+        snippet = snippet + " …"
+
+    # Mark bold tags
+    for stem in sorted(stems, key=len, reverse=True):
+        pattern = re.compile(f"(?i)\\b({re.escape(stem)}[\\w]*)", re.UNICODE)
+        # Approximate match on original text
+        snippet = pattern.sub(r"**\1**", snippet)
+    return snippet
 
 
 # ---------------------------------------------------------------------------
@@ -269,27 +242,11 @@ def search(
     expand_query: bool = True,
     min_lexical_hits: int = 5,
 ) -> list[Result]:
-    if settings.db_backend == "sqlite":
-        from apsearch.search import hybrid_sqlite
-
-        return hybrid_sqlite.search(
-            query=query,
-            mode=mode,
-            limit=limit,
-            filters=filters,
-            weights=weights,
-            candidate_pool=candidate_pool,
-            passages_per_result=passages_per_result,
-            highlight=highlight,
-            expand_query=expand_query,
-            min_lexical_hits=min_lexical_hits,
-        )
-
     limit = limit or settings.default_limit
     filters = filters or Filters()
     pool_size = candidate_pool or settings.candidate_pool
-    where, params = filters.where()
     query = (query or "").strip()
+
     if len(query) > settings.max_query_chars:
         raise ValueError(
             f"Query is too long ({len(query)} > {settings.max_query_chars} chars). "
@@ -299,92 +256,171 @@ def search(
     use_lexical = mode in ("hybrid", "keyword") and bool(query)
     use_semantic = mode in ("hybrid", "semantic") and bool(query)
 
-    with pool().connection() as conn:
-        register_vector(conn)
-        with conn.cursor() as cur:
-            # Widen HNSW search so that post-filtering doesn't starve results.
-            # SET LOCAL takes no bind parameters, hence set_config().
-            cur.execute(
-                "SELECT set_config('hnsw.ef_search', %s, true)",
-                (str(max(pool_size, 100)),),
-            )
+    where_clauses: list[str] = []
+    where_params: list[Any] = []
+    if filters.year_from is not None:
+        where_clauses.append("d.year >= ?")
+        where_params.append(filters.year_from)
+    if filters.year_to is not None:
+        where_clauses.append("d.year <= ?")
+        where_params.append(filters.year_to)
+    if filters.category:
+        where_clauses.append("d.category LIKE ?")
+        where_params.append(f"%{filters.category}%")
+    if filters.chamber:
+        where_clauses.append("d.chamber = ?")
+        where_params.append(filters.chamber)
+    if filters.cds:
+        placeholders = ",".join("?" * len(filters.cds))
+        where_clauses.append(f"d.cd IN ({placeholders})")
+        where_params.extend(filters.cds)
+    if filters.themes:
+        theme_preds = " OR ".join(["t.label LIKE ?" for _ in filters.themes])
+        where_clauses.append(
+            f"""d.cd IN (
+                SELECT dt.cd FROM decision_theme dt JOIN theme t ON t.code = dt.theme_code
+                 WHERE {theme_preds}
+            )"""
+        )
+        where_params.extend([f"%{t}%" for t in filters.themes])
 
-            qvec = None
-            if use_semantic:
-                backend = get_backend()
-                model_sig = f"{settings.embed_backend}:{backend.name}:{backend.dim}"
-                # Check query cache first (avoids API calls and costs on repeated queries)
-                qvec = cache.get_cached_vector(cur, query, model_sig)
-                if qvec is None:
-                    # Cache miss: call embedding backend. Fails loudly if API fails.
-                    raw = backend.embed_queries([query])[0]
-                    qvec = Vector(raw)
-                    cache.store_cached_vector(cur, query, model_sig, qvec)
+    where_sql = (" AND ".join(where_clauses)) if where_clauses else "1=1"
 
-            chunk_rows: list[dict] = []
-            vec_rows: list[dict] = []
-            ranked: dict[str, list[str]] = {}
-
-            qexpr, qparams = "", {}
-            if use_lexical:
-                qexpr, qparams = qbuild.prepare(cur, query, expand=expand_query)
-                chunk_rows = _chunk_lexical(cur, qexpr, qparams, where,
-                                            params, pool_size)
-                doc_rows = _doc_lexical(cur, qexpr, qparams, where,
-                                        params, pool_size)
-
-                # All query terms ANDed is the right default for precision, but
-                # it is brittle for natural-language questions: one rare word
-                # zeroes the whole lexical side. When AND is too selective,
-                # retry disjunctively -- ts_rank_cd still favours documents
-                # matching more terms, and RRF keeps the fusion stable.
-                if len(chunk_rows) < min_lexical_hits and qbuild.is_expanded(qparams):
-                    or_expr, or_params = qbuild.prepare(
-                        cur, query, expand=True, conjunctive=False
-                    )
-                    if or_expr:
-                        chunk_rows = _chunk_lexical(cur, or_expr, or_params,
-                                                    where, params, pool_size)
-                        doc_rows = _doc_lexical(cur, or_expr, or_params,
-                                                where, params, pool_size)
-                        qexpr, qparams = or_expr, or_params
-
-                ranked["chunk_lexical"] = _dedupe_keep_order(chunk_rows)
-                ranked["doc_lexical"] = _dedupe_keep_order(doc_rows)
-            if use_semantic and qvec is not None:
-                vec_rows = _semantic(cur, qvec, where, params, pool_size)
-                ranked["semantic"] = _dedupe_keep_order(vec_rows)
-
-            if not query:
-                # Filter-only browse: most recent first.
-                cur.execute(
-                    f"""
-                    SELECT d.cd FROM decision d
-                     WHERE {where}
-                     ORDER BY d.year DESC NULLS LAST, d.number DESC NULLS LAST
-                     LIMIT %(lim)s
-                    """,
-                    {**params, "lim": limit},
-                )
-                top = [(r["cd"], 0.0, {}) for r in cur.fetchall()]
+    with connect() as conn:
+        qvec = None
+        if use_semantic:
+            backend = get_backend()
+            model_sig = f"{settings.embed_backend}:{backend.name}:{backend.dim}"
+            # Check query cache
+            cached = cache.get_cached_vector(conn, query, model_sig)
+            if cached is not None:
+                qvec = cached
             else:
-                fused = rrf(ranked, weights)
-                top = [
-                    (cd, score, ranks)
-                    for cd, (score, ranks) in sorted(
-                        fused.items(), key=lambda kv: kv[1][0], reverse=True
-                    )[:limit]
-                ]
+                raw_vec = backend.embed_queries([query])[0]
+                cache.store_cached_vector(conn, query, model_sig, raw_vec)
+                qvec = raw_vec
 
-            if not top:
-                return []
+        chunk_rows: list[dict] = []
+        doc_rows: list[dict] = []
+        vec_rows: list[dict] = []
+        ranked: dict[str, list[str]] = {}
 
-            cds = [cd for cd, _, _ in top]
-            meta = _load_meta(cur, cds)
-            passages = _collect_passages(
-                cur, cds, chunk_rows, vec_rows, qexpr, qparams,
-                passages_per_result, highlight and use_lexical,
+        # 1. Lexical retrieval via FTS5
+        if use_lexical:
+            fts_query = build_fts5_query(query, conjunctive=True)
+            if fts_query:
+                cur = conn.execute(
+                    f"""
+                    SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part, f.rank AS score
+                      FROM chunk_fts f
+                      JOIN chunk c ON c.id = f.rowid
+                      JOIN decision d ON d.cd = c.cd
+                     WHERE {where_sql} AND f.content_folded MATCH ?
+                     ORDER BY f.rank
+                     LIMIT ?
+                    """,
+                    [*where_params, fts_query, pool_size],
+                )
+                chunk_rows = [dict(r) for r in cur.fetchall()]
+
+                cur = conn.execute(
+                    f"""
+                    SELECT d.cd, f.rank AS score
+                      FROM decision_fts f
+                      JOIN decision d ON d.rowid = f.rowid
+                     WHERE {where_sql} AND f.decision_fts MATCH ?
+                     ORDER BY f.rank
+                     LIMIT ?
+                    """,
+                    [*where_params, fts_query, pool_size],
+                )
+                doc_rows = [dict(r) for r in cur.fetchall()]
+
+            # Fallback to OR if AND had too few hits
+            if len(chunk_rows) < min_lexical_hits and not has_operators(query):
+                or_query = build_fts5_query(query, conjunctive=False)
+                if or_query and or_query != fts_query:
+                    cur = conn.execute(
+                        f"""
+                        SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part, f.rank AS score
+                          FROM chunk_fts f
+                          JOIN chunk c ON c.id = f.rowid
+                          JOIN decision d ON d.cd = c.cd
+                         WHERE {where_sql} AND f.content_folded MATCH ?
+                         ORDER BY f.rank
+                         LIMIT ?
+                        """,
+                        [*where_params, or_query, pool_size],
+                    )
+                    chunk_rows = [dict(r) for r in cur.fetchall()]
+
+                    cur = conn.execute(
+                        f"""
+                        SELECT d.cd, f.rank AS score
+                          FROM decision_fts f
+                          JOIN decision d ON d.rowid = f.rowid
+                         WHERE {where_sql} AND f.decision_fts MATCH ?
+                         ORDER BY f.rank
+                         LIMIT ?
+                        """,
+                        [*where_params, or_query, pool_size],
+                    )
+                    doc_rows = [dict(r) for r in cur.fetchall()]
+
+            ranked["chunk_lexical"] = [r["cd"] for r in chunk_rows]
+            ranked["doc_lexical"] = [r["cd"] for r in doc_rows]
+
+        # 2. Semantic retrieval via sqlite-vec
+        if use_semantic and qvec is not None:
+            raw_blob = sqlite_vec.serialize_float32(qvec)
+            cur = conn.execute(
+                f"""
+                WITH knn AS (
+                    SELECT rowid, distance
+                      FROM chunk_vec
+                     WHERE embedding MATCH ?
+                       AND k = ?
+                )
+                SELECT c.cd, c.id AS chunk_id, c.ordinal, c.part, k.distance AS score
+                  FROM knn k
+                  JOIN chunk c ON c.id = k.rowid
+                  JOIN decision d ON d.cd = c.cd
+                 WHERE {where_sql}
+                 ORDER BY k.distance
+                """,
+                [raw_blob, pool_size, *where_params],
             )
+            vec_rows = [dict(r) for r in cur.fetchall()]
+            ranked["semantic"] = [r["cd"] for r in vec_rows]
+
+        if not query:
+            cur = conn.execute(
+                f"""
+                SELECT cd FROM decision d
+                 WHERE {where_sql}
+                 ORDER BY d.year DESC, d.number DESC
+                 LIMIT ?
+                """,
+                [*where_params, limit],
+            )
+            top = [(r["cd"], 0.0, {}) for r in cur.fetchall()]
+        else:
+            fused = rrf(ranked, weights)
+            top = [
+                (cd, score, ranks)
+                for cd, (score, ranks) in sorted(
+                    fused.items(), key=lambda kv: kv[1][0], reverse=True
+                )[:limit]
+            ]
+
+        if not top:
+            return []
+
+        cds = [cd for cd, _, _ in top]
+        meta = _load_meta(conn, cds)
+        passages = _collect_passages(
+            conn, cds, chunk_rows, vec_rows, query, passages_per_result, highlight
+        )
 
     results: list[Result] = []
     for cd, score, ranks in top:
@@ -411,29 +447,38 @@ def search(
     return results
 
 
-def _load_meta(cur, cds: list[str]) -> dict[str, dict]:
-    cur.execute(
-        """
-        SELECT cd, number, year, category, chamber, subject, summary,
-               source_url, themes
-          FROM decision_meta WHERE cd = ANY(%s)
+def _load_meta(conn, cds: list[str]) -> dict[str, dict]:
+    placeholders = ",".join("?" * len(cds))
+    cur = conn.execute(
+        f"""
+        SELECT d.cd, d.number, d.year, d.category, d.chamber, d.subject, d.summary,
+               d.source_url,
+               coalesce(group_concat(t.label, ', '), '') AS theme_labels
+          FROM decision d
+          LEFT JOIN decision_theme dt ON dt.cd = d.cd
+          LEFT JOIN theme t ON t.code = dt.theme_code
+         WHERE d.cd IN ({placeholders})
+         GROUP BY d.cd
         """,
-        (cds,),
+        cds,
     )
-    return {r["cd"]: r for r in cur.fetchall()}
+    out = {}
+    for r in cur.fetchall():
+        d = dict(r)
+        d["themes"] = [t.strip() for t in d["theme_labels"].split(",") if t.strip()]
+        out[d["cd"]] = d
+    return out
 
 
 def _collect_passages(
-    cur,
+    conn,
     cds: list[str],
     chunk_rows: list[dict],
     vec_rows: list[dict],
-    qexpr: str,
-    qparams: dict,
+    query: str,
     per_result: int,
     highlight: bool,
 ) -> dict[str, list[Passage]]:
-    """Pick the best passages per decision from whichever retriever found them."""
     best: dict[str, dict[int, Passage]] = {cd: {} for cd in cds}
     wanted = set(cds)
 
@@ -458,46 +503,36 @@ def _collect_passages(
         p.semantic_score = float(row["score"])
 
     chosen: dict[str, list[Passage]] = {}
-    ids: list[int] = []
+    chunk_ids: list[int] = []
     for cd in cds:
         ranked = sorted(
             best[cd].values(),
             key=lambda p: (
-                # Prefer the editorial headnote, then combined evidence.
                 p.part != "summary",
-                -((p.lexical_score or 0) * 10 + (p.semantic_score or 0)),
+                -((1.0 / (abs(p.lexical_score or 1.0) + 0.1)) * 10 + (1.0 - (p.semantic_score or 1.0))),
             ),
         )[:per_result]
         chosen[cd] = ranked
-        ids.extend(p.chunk_id for p in ranked)
+        chunk_ids.extend(p.chunk_id for p in ranked)
 
-    if not ids:
+    if not chunk_ids:
         return chosen
 
-    if highlight and qexpr:
-        cur.execute(
-            f"""
-            SELECT id, content,
-                   ts_headline('el_stem', content, {qexpr},
-                               'MaxFragments=2, MaxWords=40, MinWords=18,'
-                               'StartSel=**, StopSel=**, FragmentDelimiter= … ')
-                   AS highlight
-              FROM chunk WHERE id = ANY(%(ids)s)
-            """,
-            {**qparams, "ids": ids},
-        )
-    else:
-        cur.execute(
-            "SELECT id, content, NULL AS highlight FROM chunk WHERE id = ANY(%s)",
-            (ids,),
-        )
-    texts = {r["id"]: r for r in cur.fetchall()}
+    placeholders = ",".join("?" * len(chunk_ids))
+    cur = conn.execute(
+        f"SELECT id, content FROM chunk WHERE id IN ({placeholders})",
+        chunk_ids,
+    )
+    content_map = {r["id"]: r["content"] for r in cur.fetchall()}
+
     for plist in chosen.values():
         for p in plist:
-            row = texts.get(p.chunk_id)
-            if row:
-                p.content = row["content"]
-                p.highlight = row["highlight"]
+            raw = content_map.get(p.chunk_id, "")
+            p.content = raw
+            if highlight and query:
+                p.highlight = highlight_greek(raw, query)
+            else:
+                p.highlight = raw[:350].replace("\n", " ").strip()
     return chosen
 
 
@@ -513,72 +548,60 @@ def get_decision(
     chamber: str | None = None,
     include_body: bool = True,
 ) -> list[dict]:
-    """Fetch decisions by opaque id or by citation (number/year)."""
-    if settings.db_backend == "sqlite":
-        from apsearch.search import hybrid_sqlite
-
-        return hybrid_sqlite.get_decision(
-            cd=cd, number=number, year=year, chamber=chamber, include_body=include_body
-        )
-
-    clauses, params = [], {}
+    clauses, params = [], []
     if cd:
-        clauses.append("d.cd = %(cd)s")
-        params["cd"] = cd
+        clauses.append("d.cd = ?")
+        params.append(cd)
     if number is not None:
-        clauses.append("d.number = %(number)s")
-        params["number"] = number
+        clauses.append("d.number = ?")
+        params.append(number)
     if year is not None:
-        clauses.append("d.year = %(year)s")
-        params["year"] = year
+        clauses.append("d.year = ?")
+        params.append(year)
     if chamber:
-        clauses.append("d.chamber = %(chamber)s")
-        params["chamber"] = chamber
+        clauses.append("d.chamber = ?")
+        params.append(chamber)
     if not clauses:
         raise ValueError("provide cd, or number and year")
 
     body_col = "d.body," if include_body else ""
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             f"""
             SELECT d.cd, d.number, d.year, d.category, d.chamber, d.subject,
                    d.summary, {body_col} d.source_url, d.body_chars,
-                   d.first_seen, d.last_fetched, m.themes
+                   d.first_seen, d.last_fetched,
+                   coalesce(group_concat(t.label, ', '), '') AS theme_labels
               FROM decision d
-              JOIN decision_meta m ON m.cd = d.cd
+              LEFT JOIN decision_theme dt ON dt.cd = d.cd
+              LEFT JOIN theme t ON t.code = dt.theme_code
              WHERE {' AND '.join(clauses)}
+             GROUP BY d.cd
              ORDER BY d.year DESC, d.number DESC
             """,
             params,
         )
-        return cur.fetchall()
+        out = []
+        for r in cur.fetchall():
+            row = dict(r)
+            row["themes"] = [t.strip() for t in row["theme_labels"].split(",") if t.strip()]
+            row.pop("theme_labels", None)
+            out.append(row)
+        return out
 
 
 def list_themes(prefix: str | None = None, limit: int = 100) -> list[dict]:
-    if settings.db_backend == "sqlite":
-        from apsearch.search import hybrid_sqlite
-
-        return hybrid_sqlite.list_themes(prefix=prefix, limit=limit)
-
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
+    with connect() as conn:
+        cur = conn.execute(
             """
-            SELECT t.code, t.label,
-                   -- Counted live rather than read from theme.n_decisions:
-                   -- that column is only refreshed by a thematic crawl, so it
-                   -- goes stale as soon as decisions are linked by any other
-                   -- path. Agents rank themes by this number, so it has to be
-                   -- true. decision_theme_by_theme makes it cheap.
-                   count(dt.cd) AS n_decisions
+            SELECT t.code, t.label, count(dt.cd) AS n_decisions
               FROM theme t
               LEFT JOIN decision_theme dt ON dt.theme_code = t.code
-             -- Casts are required: Postgres cannot infer a parameter's type
-             -- from `$1 IS NULL` alone and raises AmbiguousParameter.
-             WHERE (%(p)s::text IS NULL OR t.label ILIKE %(p)s::text)
+             WHERE (? IS NULL OR t.label LIKE '%' || ? || '%')
              GROUP BY t.code, t.label
              ORDER BY count(dt.cd) DESC, t.label
-             LIMIT %(lim)s
+             LIMIT ?
             """,
-            {"p": f"%{prefix}%" if prefix else None, "lim": limit},
+            (prefix, prefix, limit),
         )
-        return cur.fetchall()
+        return [dict(r) for r in cur.fetchall()]

@@ -97,7 +97,6 @@ async def app_status() -> dict:
     s = repo.stats()
     return {
         "has_api_key": bool(settings.gemini_api_key),
-        "db_backend": settings.db_backend,
         "model": settings.gemini_embed_model if settings.embed_backend == "gemini" else settings.embed_model,
         "stats": s,
     }
@@ -168,20 +167,11 @@ async def healthz() -> dict:
 
 @app.get("/readyz", include_in_schema=False)
 async def readyz() -> dict:
-    if settings.db_backend == "sqlite":
-        from apsearch.db.sqlite import connect
-
-        try:
-            with connect() as conn:
-                conn.execute("SELECT 1")
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
-        return {"status": "ready"}
-
-    from apsearch.db import query
+    from apsearch.db.sqlite import connect
 
     try:
-        query("SELECT 1")
+        with connect() as conn:
+            conn.execute("SELECT 1")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
     return {"status": "ready"}
