@@ -1,19 +1,28 @@
-"""Monitors the crawl job and sends email notifications on release and completion."""
+"""Monitors the crawl job and sends email notifications on release and completion.
+
+Credentials come from the environment (APSEARCH_NOTIFY_EMAIL /
+APSEARCH_NOTIFY_APP_PWD); never hardcode them.
+"""
 
 import json
+import os
 import smtplib
 import time
 from email.mime.text import MIMEText
 from pathlib import Path
 
 PROGRESS_FILE = Path("data/crawl_progress.json")
-EMAIL = "[REDACTED]"
-APP_PWD = "[REDACTED]"
+EMAIL = os.environ.get("APSEARCH_NOTIFY_EMAIL", "")
+APP_PWD = os.environ.get("APSEARCH_NOTIFY_APP_PWD", "")
 TAG = "v0.3.0"
 RELEASE_URL = f"https://github.com/panlybero/areios-pagos-search/releases/tag/{TAG}"
 
 
 def send_email(subject: str, body: str) -> None:
+    if not EMAIL or not APP_PWD:
+        print("Skipping notification: set APSEARCH_NOTIFY_EMAIL and APSEARCH_NOTIFY_APP_PWD")
+        return
+
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL
