@@ -7,11 +7,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/workspace/areios-pagos-search
 # Binds to all interfaces (accessible on Tailscale IP 100.70.245.77 or panagiotis-mini-pc)
-ExecStart=%h/workspace/areios-pagos-search/.venv/bin/apsearch mcp --transport sse --host 0.0.0.0 --port 8766
+# Bind to loopback only; tailscale serve proxies the .ts.net HTTPS endpoint to
+# this port, so the MCP server is reachable on the tailnet but not on the LAN.
+ExecStart=%h/workspace/areios-pagos-search/.venv/bin/apsearch mcp --transport http --host 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=5
-
-# Optional: if you want the streamable-http protocol instead of sse, change `--transport sse` to `--transport http`
 
 [Install]
 WantedBy=default.target

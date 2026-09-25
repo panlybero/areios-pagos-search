@@ -180,6 +180,23 @@ def build_server():
     return mcp
 
 
+def _relaxed_transport_security():
+    """Return transport-security settings that accept any Host header.
+
+    The SDK auto-enables DNS-rebinding protection for localhost-bound servers
+    and restricts the Host header to localhost, which rejects the forwarded
+    Host header when the server sits behind a reverse proxy such as
+    ``tailscale serve`` (HTTP 421 "Invalid Host header"). The HTTP/SSE
+    transports are only ever reached via loopback or a trusted private proxy,
+    so that browser-focused defence is not applicable; disable it.
+    """
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:  # pragma: no cover - SDK without the middleware
+        return None
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
 def run(transport: str = "stdio", host: str = "0.0.0.0", port: int = 8080) -> None:
     mcp = build_server()
     _, generation = _server_class()
@@ -188,16 +205,18 @@ def run(transport: str = "stdio", host: str = "0.0.0.0", port: int = 8080) -> No
         mcp.run(transport="stdio")
         return
     if transport in ("http", "streamable-http"):
+        security = _relaxed_transport_security()
         if generation >= 2:
-            mcp.run(transport="streamable-http", host=host, port=port)
+            mcp.run(transport="streamable-http", host=host, port=port, transport_security=security)
         else:
             mcp.settings.host = host
             mcp.settings.port = port
             mcp.run(transport="streamable-http")
         return
     if transport == "sse":
+        security = _relaxed_transport_security()
         if generation >= 2:
-            mcp.run(transport="sse", host=host, port=port)
+            mcp.run(transport="sse", host=host, port=port, transport_security=security)
         else:
             mcp.settings.host = host
             mcp.settings.port = port
