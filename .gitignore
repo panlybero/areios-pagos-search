@@ -25,6 +25,10 @@ build/
 .ruff_cache/
 .mypy_cache/
 
+# --- mcpb desktop extension ------------------------------------------------
+mcpb/node_modules/
+*.mcpb
+
 # --- editors / os ----------------------------------------------------------
 .DS_Store
 .idea/

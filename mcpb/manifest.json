@@ -1,0 +1,44 @@
+{
+  "manifest_version": "0.3",
+  "name": "areios-pagos",
+  "display_name": "Άρειος Πάγος Search",
+  "version": "1.0.0",
+  "description": "Hybrid keyword + semantic search over Greek Supreme Court (Άρειος Πάγος) case law, 1994–present.",
+  "long_description": "Search the published case law of the Άρειος Πάγος (Supreme Court of Greece). Combines Greek full-text keyword search with semantic (vector) search. Tools: search_decisions, get_decision, list_themes, corpus_stats.",
+  "author": {
+    "name": "Panagiotis Lymperopoulos"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "APSEARCH_MCP_URL": "${user_config.mcp_url}"
+      }
+    }
+  },
+  "user_config": {
+    "mcp_url": {
+      "type": "string",
+      "title": "MCP Server URL",
+      "description": "Remote areios-pagos MCP endpoint (hosted on the home mini PC, reached over Tailscale).",
+      "default": "https://panagiotis-mini-pc.tail6c2662.ts.net/mcp",
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "search_decisions", "description": "Search Areios Pagos decisions (hybrid / keyword / semantic)." },
+    { "name": "get_decision", "description": "Fetch one decision by citation (e.g. 144/2015) or opaque id." },
+    { "name": "list_themes", "description": "List the court's own subject headings (λήμματα)." },
+    { "name": "corpus_stats", "description": "Size and coverage of the local index." }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=18.0.0" }
+  },
+  "keywords": ["law", "greek", "areios-pagos", "case-law", "νομολογία"],
+  "license": "MIT"
+}
